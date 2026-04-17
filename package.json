@@ -9,9 +9,14 @@
     "preview": "vite preview"
   },
   "devDependencies": {
+    "@vitejs/plugin-react": "^6.0.1",
     "vite": "^8.0.1"
   },
   "dependencies": {
-    "mathlive": "^0.109.1"
+    "@tailwindcss/vite": "^4.2.2",
+    "mathlive": "^0.109.1",
+    "react": "^19.2.5",
+    "react-dom": "^19.2.5",
+    "tailwindcss": "^4.2.2"
   }
 }

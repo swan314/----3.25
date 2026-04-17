@@ -2,14 +2,14 @@
   --text: #6b6375;
   --text-h: #08060d;
   --bg: #fff;
-  --border: #d3b7f3;
+  --border: #f3d77a;
   --code-bg: #f4f3ec;
-  --accent: #7a19d8;
-  --accent-bg: rgba(122, 25, 216, 0.14);
-  --accent-border: rgba(122, 25, 216, 0.62);
+  --accent: #1d4ed8;
+  --accent-bg: rgba(29, 78, 216, 0.14);
+  --accent-border: rgba(29, 78, 216, 0.45);
   --social-bg: rgba(244, 243, 236, 0.5);
   --shadow:
-    rgba(122, 25, 216, 0.22) 0 10px 15px -3px, rgba(122, 25, 216, 0.1) 0 4px 6px -2px;
+    rgba(29, 78, 216, 0.22) 0 10px 15px -3px, rgba(250, 204, 21, 0.16) 0 4px 6px -2px;
 
   --sans: system-ui, 'Segoe UI', Roboto, sans-serif;
   --heading: system-ui, 'Segoe UI', Roboto, sans-serif;
@@ -35,14 +35,14 @@
     --text: #9ca3af;
     --text-h: #f3f4f6;
     --bg: #16171d;
-    --border: #5f3e88;
+    --border: #8a7a32;
     --code-bg: #1f2028;
-    --accent: #c084fc;
-    --accent-bg: rgba(192, 132, 252, 0.24);
-    --accent-border: rgba(192, 132, 252, 0.68);
+    --accent: #93c5fd;
+    --accent-bg: rgba(147, 197, 253, 0.26);
+    --accent-border: rgba(147, 197, 253, 0.62);
     --social-bg: rgba(47, 48, 58, 0.5);
     --shadow:
-      rgba(192, 132, 252, 0.28) 0 10px 15px -3px, rgba(192, 132, 252, 0.14) 0 4px 6px -2px;
+      rgba(59, 130, 246, 0.3) 0 10px 15px -3px, rgba(250, 204, 21, 0.16) 0 4px 6px -2px;
   }
 
   #social .button-icon {
@@ -299,8 +299,8 @@ code {
 .mm-shell {
   min-height: 100svh;
   background:
-    radial-gradient(900px 420px at 50% -10%, rgba(170, 59, 255, 0.18), transparent 60%),
-    radial-gradient(700px 360px at 10% 0%, rgba(170, 59, 255, 0.1), transparent 55%),
+    radial-gradient(900px 420px at 50% -10%, rgba(37, 99, 235, 0.2), transparent 60%),
+    radial-gradient(700px 360px at 10% 0%, rgba(250, 204, 21, 0.18), transparent 55%),
     var(--bg);
   display: flex;
   flex-direction: column;
@@ -411,27 +411,29 @@ code {
   text-align: center;
 }
 
-.mm-hero {
-  position: relative;
-  width: 132px;
-  height: 132px;
-  margin: 0 auto;
+.mm-hero-row {
+  display: flex;
+  justify-content: center;
+  gap: 10px;
+  flex-wrap: nowrap;
+}
+
+.mm-hero-card {
+  width: 96px;
+  height: 168px; /* 4:7 */
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.7);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
 }
 
 .mm-hero-img {
-  width: 132px;
-  height: 132px;
+  width: 100%;
+  height: 100%;
   object-fit: contain;
-  z-index: 1;
-  position: relative;
-}
-
-.mm-hero-glow {
-  position: absolute;
-  inset: -30px;
-  background: radial-gradient(circle at 35% 30%, rgba(170, 59, 255, 0.35), transparent 55%);
-  filter: blur(6px);
-  z-index: 0;
 }
 
 .mm-welcome-heading {
@@ -467,13 +469,13 @@ code {
   color: white;
   cursor: pointer;
   background: linear-gradient(180deg, var(--accent), #5e14a9);
-  box-shadow: 0 10px 24px rgba(122, 25, 216, 0.36);
+  box-shadow: 0 10px 24px rgba(37, 99, 235, 0.34);
   transition: transform 0.08s ease, box-shadow 0.2s ease, filter 0.2s ease;
 }
 
 .mm-btn-primary:hover {
   filter: brightness(1.03);
-  box-shadow: 0 14px 30px rgba(122, 25, 216, 0.44);
+  box-shadow: 0 14px 30px rgba(37, 99, 235, 0.4);
 }
 
 .mm-btn-primary:active {
@@ -581,7 +583,7 @@ code {
 
 .mm-btn-secondary:hover {
   filter: brightness(1.05);
-  background: rgba(170, 59, 255, 0.06);
+  background: rgba(250, 204, 21, 0.12);
 }
 
 .mm-btn-secondary:focus-visible {
@@ -618,6 +620,15 @@ code {
 
   .mm-welcome-card {
     padding: 22px 18px 18px;
+  }
+
+  .mm-hero-row {
+    gap: 6px;
+  }
+
+  .mm-hero-card {
+    width: 72px;
+    height: 126px; /* 4:7 */
   }
 
   .mm-welcome-heading {
@@ -700,7 +711,7 @@ code {
 
 .mm-ghost-btn:hover {
   filter: brightness(1.05);
-  background: rgba(122, 25, 216, 0.1);
+  background: rgba(29, 78, 216, 0.1);
   border-color: var(--accent-border);
 }
 
@@ -757,7 +768,7 @@ code {
 
 .mm-history-item.current {
   border-color: var(--accent-border);
-  background: rgba(170, 59, 255, 0.06);
+  background: rgba(250, 204, 21, 0.12);
 }
 
 .mm-history-head {
@@ -881,7 +892,7 @@ code {
 .mm-mode-toggle {
   appearance: none;
   border: 1px solid var(--accent-border);
-  background: rgba(122, 25, 216, 0.08);
+  background: rgba(29, 78, 216, 0.08);
   color: var(--accent);
   font-family: var(--mono);
   font-size: 12px;
@@ -952,7 +963,7 @@ code {
 .mm-tool-btn {
   appearance: none;
   border: 1px solid var(--accent-border);
-  background: rgba(122, 25, 216, 0.08);
+  background: rgba(29, 78, 216, 0.08);
   color: var(--accent);
   font-family: var(--mono);
   font-size: 14px;
@@ -963,7 +974,7 @@ code {
 }
 
 .mm-tool-btn:hover {
-  background: rgba(122, 25, 216, 0.16);
+  background: rgba(29, 78, 216, 0.16);
 }
 
 .mm-eq-prefix {
@@ -1143,7 +1154,7 @@ code {
   height: 96px;
   border-radius: 16px;
   border: 1px solid var(--accent-border);
-  background: rgba(122, 25, 216, 0.08);
+  background: rgba(29, 78, 216, 0.08);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -1290,8 +1301,8 @@ code {
 
 .mm-level-card.active {
   border-color: var(--accent-border);
-  box-shadow: 0 6px 16px rgba(122, 25, 216, 0.18);
-  background: rgba(122, 25, 216, 0.08);
+  box-shadow: 0 6px 16px rgba(29, 78, 216, 0.2);
+  background: rgba(29, 78, 216, 0.08);
 }
 
 .mm-level-head {
@@ -1322,7 +1333,7 @@ code {
   font-family: var(--mono);
   font-size: 15px;
   font-weight: 700;
-  background: rgba(122, 25, 216, 0.06);
+  background: rgba(250, 204, 21, 0.12);
 }
 
 .mm-level-title {
@@ -1355,7 +1366,7 @@ code {
   padding: 6px 10px;
   border-radius: 999px;
   border: 1px solid var(--accent-border);
-  background: rgba(122, 25, 216, 0.08);
+  background: rgba(29, 78, 216, 0.08);
 }
 
 .mm-compare-block {

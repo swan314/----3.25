@@ -1,5 +1,5 @@
 import './style.css'
-import heroImg from './assets/hero.png'
+import magicMainIllustration from './assets/magic-main-illustration.png'
 import sonGokuImg from './assets/son-goku.png'
 import shaoImg from './assets/shao.png'
 import samjangImg from './assets/samjang.png'
@@ -7,6 +7,40 @@ import okdongjaImg from './assets/okdongja.png'
 import 'mathlive'
 
 const app = document.querySelector('#app')
+const directSheetsWebhookUrl =
+  'https://script.google.com/macros/s/AKfycbxS6jJolgQuiHPwn5s6i_DHekp6bt-Ac-bppWxFQN6hKTEd8BMLsdpCgWNDDNam0ujzvA/exec'
+
+function getStudentNicknameFromHash() {
+  const hashRaw = (location.hash || '').replace(/^#/, '')
+  const queryIndex = hashRaw.indexOf('?')
+  if (queryIndex === -1) return ''
+  const query = hashRaw.slice(queryIndex + 1)
+  const params = new URLSearchParams(query)
+  return (params.get('nickname') || '').trim()
+}
+
+async function saveDataToSheets(payload) {
+  try {
+    await fetch(directSheetsWebhookUrl, {
+      method: 'POST',
+      mode: 'no-cors',
+      headers: {
+        'Content-Type': 'text/plain',
+      },
+      body: JSON.stringify(payload),
+      keepalive: true,
+    })
+    // no-cors 모드에서는 응답 확인이 불가하므로 throw 없으면 성공으로 간주
+    return { ok: true, reason: 'no_cors_assumed_success' }
+  } catch (error) {
+    console.error('[Sheets] saveDataToSheets:error', error)
+    return { ok: false, reason: 'network_error', message: error?.message || 'unknown_error' }
+  }
+}
+
+async function sendLearningResultToSheet(payload) {
+  return saveDataToSheets(payload)
+}
 
 function renderWelcome() {
   app.innerHTML = `
@@ -15,8 +49,8 @@ function renderWelcome() {
       <div class="mm-brand">
         <div class="mm-logo" aria-hidden="true">=</div>
         <div class="mm-brand-text">
-          <div class="mm-title-top">MATH-MASTER</div>
-          <div class="mm-title-sub">방정식 마스터</div>
+          <div class="mm-title-top">MAGIC MATH WORLD</div>
+          <div class="mm-title-sub">MAGIC MATH ADVENTURE</div>
         </div>
       </div>
       <div class="mm-badge" id="mm-progress-badge">Lv. 진단 준비</div>
@@ -24,9 +58,19 @@ function renderWelcome() {
 
     <main class="mm-main">
       <section class="mm-welcome-card" aria-labelledby="mm-welcome-heading">
-        <div class="mm-hero" aria-hidden="true">
-          <img src="${heroImg}" alt="" class="mm-hero-img" />
-          <div class="mm-hero-glow"></div>
+        <div class="mm-hero-row" aria-hidden="true">
+          <div class="mm-hero-card">
+            <img src="${sonGokuImg}" alt="" class="mm-hero-img" />
+          </div>
+          <div class="mm-hero-card">
+            <img src="${shaoImg}" alt="" class="mm-hero-img" />
+          </div>
+          <div class="mm-hero-card">
+            <img src="${samjangImg}" alt="" class="mm-hero-img" />
+          </div>
+          <div class="mm-hero-card">
+            <img src="${okdongjaImg}" alt="" class="mm-hero-img" />
+          </div>
         </div>
 
         <h1 class="mm-welcome-heading" id="mm-welcome-heading">
@@ -74,6 +118,12 @@ function renderWelcome() {
 function renderLevelCheckPlaceholder(problemIdx = 0) {
   if (!window.__mmAssessment) {
     window.__mmAssessment = { answersByProblem: {}, scoresByProblem: {} }
+  }
+  if (!window.__mmAssessment.reportedPasses) {
+    window.__mmAssessment.reportedPasses = {}
+  }
+  if (window.__mmAssessment.reportedFinalCompletion == null) {
+    window.__mmAssessment.reportedFinalCompletion = false
   }
   const problems = [
     {
@@ -346,6 +396,59 @@ function renderLevelCheckPlaceholder(problemIdx = 0) {
   window.__mmAssessment.answersByProblem[problem.id] = answers
   window.__mmAssessment.latexByProblem[problem.id] = latexAnswers
   window.__mmAssessment.scoresByProblem[problem.id] = scores
+
+  function getCurrentTotalScore() {
+    return problems.reduce((sum, p) => {
+      const scored = window.__mmAssessment.scoresByProblem[p.id] || []
+      return sum + scored.reduce((acc, value) => acc + (value || 0), 0)
+    }, 0)
+  }
+
+  async function reportStagePass(stage, stageScore) {
+    if (!stageScore?.ok) return
+    const passKey = `${problem.id}-stage-${stage.id}`
+    if (window.__mmAssessment.reportedPasses[passKey]) return
+    window.__mmAssessment.reportedPasses[passKey] = true
+
+    const payload = {
+      nickname: getStudentNicknameFromHash() || '익명',
+      userLevel: `${problem.title}-${stage.title} 통과`,
+      problemNumber: problemIdx + 1,
+      stageNumber: stage.id,
+      stageTitle: stage.title,
+      score: getCurrentTotalScore(),
+      completionDate: new Date().toISOString(),
+    }
+
+    return sendLearningResultToSheet(payload)
+  }
+
+  async function reportFinalCompletion(level, totalScore) {
+    if (window.__mmAssessment.reportedFinalCompletion) return
+    window.__mmAssessment.reportedFinalCompletion = true
+    const diagnosticLevelByTier = {
+      최상: '최상(손오공)',
+      상: '상(샤오)',
+      중: '중(삼장)',
+      하: '하(옥동자)',
+    }
+    const diagnosticLevel = diagnosticLevelByTier[level] || '하(옥동자)'
+
+    const payload = {
+      eventType: 'diagnostic',
+      nickname: getStudentNicknameFromHash() || '익명',
+      diagnosticLevel,
+      diagnosticScore: totalScore,
+      userLevel: `진단평가 완료 (${level})`,
+      problemNumber: 'final',
+      stageNumber: 'final',
+      stageTitle: '최종 성취',
+      score: totalScore,
+      completionDate: new Date().toISOString(),
+    }
+
+    return sendLearningResultToSheet(payload)
+  }
 
   function normalizeForText(s) {
     return (s || '')
@@ -866,8 +969,8 @@ function renderLevelCheckPlaceholder(problemIdx = 0) {
       <div class="mm-brand">
         <div class="mm-logo" aria-hidden="true">=</div>
         <div class="mm-brand-text">
-          <div class="mm-title-top">MATH-MASTER</div>
-          <div class="mm-title-sub">방정식 마스터</div>
+          <div class="mm-title-top">MAGIC MATH WORLD</div>
+          <div class="mm-title-sub">MAGIC MATH ADVENTURE</div>
         </div>
       </div>
       <div class="mm-badge" id="mm-progress-badge">Lv. 진단 0/${problems[0].stages.reduce((a, s) => a + s.points, 0)}</div>
@@ -1018,6 +1121,7 @@ function renderLevelCheckPlaceholder(problemIdx = 0) {
   const toolBtns = Array.from(app.querySelectorAll('.mm-tool-btn'))
   let activeInputEl = null
   let activeMathfieldEl = null
+  let isSubmittingStep = false
   const submitBtnEl = app.querySelector('#mm-submit-step')
   const prevBtnEl = app.querySelector('#mm-prev-step')
   const historyEl = app.querySelector('#mm-history-block')
@@ -1344,7 +1448,7 @@ function renderLevelCheckPlaceholder(problemIdx = 0) {
     feedbackEl.dataset.tone = tone || 'neutral'
   }
 
-  function renderFinalAchievementTable() {
+  async function renderFinalAchievementTable() {
     const qCount = 4
     const problemSums = problems.map((p) => {
       const sc = window.__mmAssessment.scoresByProblem[p.id] || []
@@ -1412,11 +1516,16 @@ function renderLevelCheckPlaceholder(problemIdx = 0) {
     }
 
     const activeProfile = levelProfiles[level]
+    const finalSendResult = await reportFinalCompletion(level, total)
+    if (!finalSendResult?.ok) {
+      alert(`최종 결과 전송 실패: ${finalSendResult?.reason || 'unknown_error'}`)
+      return
+    }
     const levelAvatarImg = {
-      최상: { src: sonGokuImg, alt: '손오공 캐릭터' },
-      상: { src: shaoImg, alt: '샤오 캐릭터' },
-      중: { src: samjangImg, alt: '삼장 캐릭터' },
-      하: { src: okdongjaImg, alt: '옥동자 캐릭터' },
+      최상: { src: sonGokuImg, alt: '최상 캐릭터 손오공' },
+      상: { src: shaoImg, alt: '상 캐릭터 샤오' },
+      중: { src: samjangImg, alt: '중 캐릭터 삼장' },
+      하: { src: okdongjaImg, alt: '하 캐릭터 옥동자' },
     }
     const av = levelAvatarImg[level]
     const avatarInner = `<img src="${av.src}" alt="${escapeHtml(av.alt)}" class="mm-final-avatar-img" width="240" height="240" />`
@@ -1427,8 +1536,8 @@ function renderLevelCheckPlaceholder(problemIdx = 0) {
         <div class="mm-brand">
           <div class="mm-logo" aria-hidden="true">=</div>
           <div class="mm-brand-text">
-            <div class="mm-title-top">MATH-MASTER</div>
-            <div class="mm-title-sub">방정식 마스터</div>
+            <div class="mm-title-top">MAGIC MATH WORLD</div>
+            <div class="mm-title-sub">MAGIC MATH ADVENTURE</div>
           </div>
         </div>
         <div class="mm-badge">최종 성취 ${total}/${totalMax}</div>
@@ -1487,40 +1596,45 @@ function renderLevelCheckPlaceholder(problemIdx = 0) {
     })
   }
 
-  app.querySelector('#mm-submit-step')?.addEventListener('click', () => {
-    const stage = stages[stageIndex]
-    const useMathField = isMathFieldStage(stage)
-    let studentInput = ''
-    if (stage.multiInput) {
-      if (useMathField) syncMultiMathFieldToInputs()
-      const a1 = (inputEl1?.value || '').trim()
-      const a2 = (inputEl2?.value || '').trim()
-      studentInput = [a1, a2].filter(Boolean).join('\n')
-      if (useMathField) {
+  app.querySelector('#mm-submit-step')?.addEventListener('click', async () => {
+    if (isSubmittingStep) return
+    isSubmittingStep = true
+    if (submitBtnEl) submitBtnEl.disabled = true
+
+    try {
+      const stage = stages[stageIndex]
+      const useMathField = isMathFieldStage(stage)
+      let studentInput = ''
+      if (stage.multiInput) {
+        if (useMathField) syncMultiMathFieldToInputs()
+        const a1 = (inputEl1?.value || '').trim()
+        const a2 = (inputEl2?.value || '').trim()
+        studentInput = [a1, a2].filter(Boolean).join('\n')
+        if (useMathField) {
+          const l1 = (inputEl1?.dataset.latex || '').trim()
+          const l2 = (inputEl2?.dataset.latex || '').trim()
+          latexAnswers[stageIndex] = [l1, l2].filter(Boolean).join('\n')
+        } else {
+          latexAnswers[stageIndex] = ''
+        }
+      } else {
+        if (useMathField) syncMathFieldToInput()
+        studentInput = (inputEl?.value || '').trim()
+        latexAnswers[stageIndex] = useMathField ? (inputEl?.dataset.latex || '').trim() : ''
+      }
+
+      let latexStr = (inputEl?.dataset.latex || '').trim()
+      if (stage.multiInput) {
         const l1 = (inputEl1?.dataset.latex || '').trim()
         const l2 = (inputEl2?.dataset.latex || '').trim()
-        latexAnswers[stageIndex] = [l1, l2].filter(Boolean).join('\n')
-      } else {
-        latexAnswers[stageIndex] = ''
+        latexStr = [l1, l2].filter(Boolean).join('\n')
       }
-    } else {
-      if (useMathField) syncMathFieldToInput()
-      studentInput = (inputEl?.value || '').trim()
-      latexAnswers[stageIndex] = useMathField ? (inputEl?.dataset.latex || '').trim() : ''
-    }
-
-    let latexStr = (inputEl?.dataset.latex || '').trim()
-    if (stage.multiInput) {
-      const l1 = (inputEl1?.dataset.latex || '').trim()
-      const l2 = (inputEl2?.dataset.latex || '').trim()
-      latexStr = [l1, l2].filter(Boolean).join('\n')
-    }
-    let mfLive1 = stage.multiInput && mathfieldEl1?.getValue ? (mathfieldEl1.getValue('latex') || '').trim() : ''
-    let mfLive2 = stage.multiInput && mathfieldEl2?.getValue ? (mathfieldEl2.getValue('latex') || '').trim() : ''
-    let mfLiveSingle = !stage.multiInput && mathfieldEl?.getValue ? (mathfieldEl.getValue('latex') || '').trim() : ''
-    let mfLive = stage.multiInput ? [mfLive1, mfLive2].filter(Boolean).join('\n') : mfLiveSingle
+      let mfLive1 = stage.multiInput && mathfieldEl1?.getValue ? (mathfieldEl1.getValue('latex') || '').trim() : ''
+      let mfLive2 = stage.multiInput && mathfieldEl2?.getValue ? (mathfieldEl2.getValue('latex') || '').trim() : ''
+      let mfLiveSingle = !stage.multiInput && mathfieldEl?.getValue ? (mathfieldEl.getValue('latex') || '').trim() : ''
+      let mfLive = stage.multiInput ? [mfLive1, mfLive2].filter(Boolean).join('\n') : mfLiveSingle
     // [1단계] 미지수: 수식 필드 최종 동기화 후 x 검사 (p4·p5 등 누락 방지)
-    if (stage.type === 'text' && stage.id === 1 && useMathField) {
+      if (stage.type === 'text' && stage.id === 1 && useMathField) {
       if (stage.multiInput) syncMultiMathFieldToInputs()
       else syncMathFieldToInput()
       if (!stage.multiInput) {
@@ -1542,7 +1656,7 @@ function renderLevelCheckPlaceholder(problemIdx = 0) {
       mfLive = stage.multiInput ? [mfLive1, mfLive2].filter(Boolean).join('\n') : mfLiveSingle
     }
     // [1단계] 미지수: 반드시 x(또는 X) 포함 — 모든 문제 공통
-    if (stage.type === 'text' && stage.id === 1) {
+      if (stage.type === 'text' && stage.id === 1) {
       const combined = `${studentInput}\n${latexStr}\n${mfLive}`
       if (!answerContainsVariableX(combined)) {
         showFeedback("미지수를 나타낼 때 문자 'x'를 포함해 주세요. (예: x: …, … = x)", 'bad')
@@ -1550,7 +1664,7 @@ function renderLevelCheckPlaceholder(problemIdx = 0) {
       }
     }
     // [2단계] 방정식: 등호 포함
-    if (stage.type === 'equation') {
+      if (stage.type === 'equation') {
       const combined = `${studentInput}\n${latexStr}\n${mfLive}`
       if (!combined.includes('=')) {
         showFeedback('일차방정식에 등호(=)를 포함하세요.', 'bad')
@@ -1558,52 +1672,77 @@ function renderLevelCheckPlaceholder(problemIdx = 0) {
       }
     }
     // [3단계] 방정식 풀기: 숫자 형태 권장
-    if (stage.type === 'numeric' && stage.id === 3) {
+      if (stage.type === 'numeric' && stage.id === 3) {
       if (!Number.isFinite(parseFlexibleNumber(studentInput))) {
         showFeedback('숫자로 입력하세요', 'bad')
         return
       }
     }
-    answers[stageIndex] = studentInput
+      answers[stageIndex] = studentInput
+      const gradedCurrentStage = scoreStage(stage, studentInput)
+      scores[stageIndex] = gradedCurrentStage.score
+      const stagePassPromise = reportStagePass(stage, gradedCurrentStage)
 
     // 단계별 즉시 피드백은 숨기고, 마지막 단계에서 한꺼번에 채점 결과를 보여줌
-    feedbackEl.textContent = ''
+      feedbackEl.textContent = ''
 
-    const isLast = stageIndex === stages.length - 1
-    if (!isLast) {
-      stageIndex += 1
-      updateStepUI()
-      return
+      const isLast = stageIndex === stages.length - 1
+      if (!isLast) {
+        // 다음 단계 화면은 즉시 이동, 시트 전송은 백그라운드 처리
+        stagePassPromise.catch((err) => console.warn('[Sheets] stage pass send failed', err))
+        stageIndex += 1
+        updateStepUI()
+        return
+      }
+
+      // 마지막 단계는 기존처럼 전송 완료를 대기
+      await stagePassPromise
+
+    // 진단평가(5번 문제) 마지막 "결과 보기" 클릭 시 가장 먼저 강제 전송
+      if (problemIdx === problems.length - 1) {
+      const lastStepSendResult = await saveDataToSheets({
+        nickname: getStudentNicknameFromHash() || '익명',
+        userLevel: '결과 보기 버튼 클릭(최종 문제)',
+        problemNumber: problemIdx + 1,
+        stageNumber: stage.id,
+        stageTitle: stage.title,
+        score: getCurrentTotalScore(),
+        completionDate: new Date().toISOString(),
+      })
+      if (!lastStepSendResult?.ok) {
+        alert(`결과 보기 전송 실패: ${lastStepSendResult?.reason || 'unknown_error'}`)
+        return
+      }
     }
 
     // 문제 완료 시점에 한꺼번에 채점
-    for (let i = 0; i < stages.length; i += 1) {
+      for (let i = 0; i < stages.length; i += 1) {
       const graded = scoreStage(stages[i], answers[i] || '')
       scores[i] = graded.score
     }
 
     // 문제 완료 결과 화면 표시(문제별)
-    const total = scores.reduce((a, b) => a + b, 0)
-    let grade = '하'
-    let gradeMsg = '기초부터 다시 다져보자!'
-    if (total >= 8) {
-      grade = '상'
-      gradeMsg = '잘하고 있어요! 다음 진단도 기대해도 좋아요.'
-    } else if (total >= 5) {
-      grade = '중'
-      gradeMsg = '중간이에요. 실수를 줄이면 더 올라갈 수 있어요.'
-    }
+      const total = scores.reduce((a, b) => a + b, 0)
+      let grade = '하'
+      let gradeMsg = '기초부터 다시 다져보자!'
+      if (total >= 8) {
+        grade = '상'
+        gradeMsg = '잘하고 있어요! 다음 진단도 기대해도 좋아요.'
+      } else if (total >= 5) {
+        grade = '중'
+        gradeMsg = '중간이에요. 실수를 줄이면 더 올라갈 수 있어요.'
+      }
 
-    const totalPoints = stages.reduce((acc, s) => acc + s.points, 0)
-    const hasNextProblem = problemIdx < problems.length - 1
-    app.innerHTML = `
+      const totalPoints = stages.reduce((acc, s) => acc + s.points, 0)
+      const hasNextProblem = problemIdx < problems.length - 1
+      app.innerHTML = `
     <div class="mm-shell" role="application" aria-label="math-master">
       <header class="mm-header">
         <div class="mm-brand">
           <div class="mm-logo" aria-hidden="true">=</div>
           <div class="mm-brand-text">
-          <div class="mm-title-top">MATH-MASTER</div>
-            <div class="mm-title-sub">방정식 마스터</div>
+          <div class="mm-title-top">MAGIC MATH WORLD</div>
+            <div class="mm-title-sub">MAGIC MATH ADVENTURE</div>
           </div>
         </div>
         <div class="mm-badge" id="mm-progress-badge">Lv. 진단 완료 ${total}/${totalPoints}</div>
@@ -1673,6 +1812,10 @@ function renderLevelCheckPlaceholder(problemIdx = 0) {
         e.preventDefault()
         location.hash = '#welcome'
       })
+    } finally {
+      isSubmittingStep = false
+      if (submitBtnEl) submitBtnEl.disabled = false
+    }
   })
 
   app.querySelector('#mm-prev-step')?.addEventListener('click', () => {
@@ -1684,8 +1827,9 @@ function renderLevelCheckPlaceholder(problemIdx = 0) {
 }
 
 function renderRoute() {
-  const hash = (location.hash || '').replace('#', '')
-  if (hash === 'level-check') {
+  const hash = (location.hash || '').replace(/^#/, '')
+  const routeName = hash.split('?')[0]
+  if (routeName === 'level-check') {
     window.__mmAssessment = { answersByProblem: {}, scoresByProblem: {} }
     renderLevelCheckPlaceholder()
   }
