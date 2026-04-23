@@ -1,9 +1,14 @@
 import { useEffect, useRef, useState } from 'react'
 import magicMainIllustration from './assets/magic-main-illustration.png'
+import TrainingMode from './TrainingMode'
+import { MM_TRAINING_LAUNCH_KEY, createTrainingLaunchFromDiagnostic } from './levelConfig'
+import { fetchStudentLearningProgress } from './sheets'
 
 function decodeJwtPayload(token) {
   try {
+    if (typeof token !== 'string' || !token.includes('.')) return null
     const base64Url = token.split('.')[1]
+    if (!base64Url) return null
     const base64 = base64Url.replace(/-/g, '+').replace(/_/g, '/')
     const json = decodeURIComponent(
       atob(base64)
@@ -20,23 +25,74 @@ function decodeJwtPayload(token) {
 export default function App() {
   const [studentNickname, setStudentNickname] = useState('')
   const [activeView, setActiveView] = useState('landing')
+  const [trainingPlan, setTrainingPlan] = useState(null)
+  const [isCheckingStudentProgress, setIsCheckingStudentProgress] = useState(false)
   const [teacherProfile, setTeacherProfile] = useState(null)
   const [teacherAuthError, setTeacherAuthError] = useState('')
   const googleBtnRef = useRef(null)
 
-  const handleStudentStart = (event) => {
+  const handleStudentStart = async (e) => {
+    e.preventDefault(); // 1. 폼이 새로고침되는 것을 막습니다.
+    
+    if (!studentNickname.trim()) {
+      alert("닉네임을 입력해주세요!");
+      return;
+    }
+  
+    setIsCheckingStudentProgress(true); // 2. 로딩 시작
+  
+    try {
+      // 3. 서버(구글 시트)에 데이터가 있는지 조회 (방금 만든 doGet 사용)
+      const response = await fetch(`${import.meta.env.VITE_SHEETS_WEBHOOK_URL}?nickname=${encodeURIComponent(studentNickname.trim())}`);
+      const data = await response.json();
+  
+      // 4. 결과에 따른 분기
+      if (data.found) {
+        // 데이터가 있으면 바로 수련 모드로 이동
+        console.log("기존 데이터 확인됨, 수련 모드로 진입합니다.", data.data);
+        setTrainingPlan(data.data); // 받아온 데이터를 학습 계획에 반영
+        setActiveView('training');  // 수련 화면으로 전환
+      } else {
+        // 데이터가 없으면 진단평가 페이지로 이동 (이 부분은 선생님이 설정하신 기존 페이지 이동 로직으로 바꾸시면 됩니다)
+        console.log("새로운 학생입니다. 진단평가를 시작합니다.");
+        setActiveView('diagnostic'); // 진단평가 화면으로 전환
+      }
+    } catch (error) {
+      console.error("데이터 조회 실패:", error);
+      alert("서버 연결에 실패했습니다. 다시 시도해주세요.");
+    } finally {
+      setIsCheckingStudentProgress(false); // 5. 로딩 종료
+    }
+  };
+
+  const handleStudentTraining = (event) => {
     event.preventDefault()
     const name = studentNickname.trim()
     if (!name) {
       window.alert('닉네임을 입력해 주세요.')
       return
     }
-
-    // 기존에 구현된 진단평가/채점/레벨분석/캐릭터 결과 흐름으로 이동
-    window.location.href = `/legacy.html#level-check?nickname=${encodeURIComponent(name)}`
+    setTrainingPlan(null)
+    setActiveView('training')
   }
 
   useEffect(() => {
+    const rawLaunch = sessionStorage.getItem(MM_TRAINING_LAUNCH_KEY)
+    if (rawLaunch) {
+      try {
+        const plan = JSON.parse(rawLaunch)
+        if (plan?.stages?.length) {
+          if (plan.nickname) setStudentNickname(String(plan.nickname))
+          setTrainingPlan(plan)
+          setActiveView('training')
+          sessionStorage.removeItem(MM_TRAINING_LAUNCH_KEY)
+          return
+        }
+      } catch {
+        sessionStorage.removeItem(MM_TRAINING_LAUNCH_KEY)
+      }
+    }
+
     const savedTeacher = sessionStorage.getItem('teacherProfile')
     if (savedTeacher) {
       try {
@@ -129,6 +185,17 @@ export default function App() {
       <div className="pointer-events-none absolute inset-0 opacity-25 [background-image:radial-gradient(circle_at_center,rgba(59,130,246,0.22)_1.5px,transparent_1.5px),radial-gradient(circle_at_center,rgba(234,179,8,0.2)_1.5px,transparent_1.5px)] [background-position:0_0,28px_28px] [background-size:56px_56px]" />
 
       <main className="relative mx-auto flex w-full max-w-6xl flex-col px-4 py-8 sm:px-6 lg:px-10 lg:py-12">
+        {activeView === 'training' && (
+          <TrainingMode
+            nickname={studentNickname.trim() || '익명'}
+            trainingPlan={trainingPlan}
+            onExit={() => {
+              setTrainingPlan(null)
+              setActiveView('landing')
+            }}
+          />
+        )}
+
         {activeView === 'landing' && (
           <section className="rounded-3xl border border-blue-200/80 bg-white/70 p-6 shadow-2xl shadow-blue-300/20 backdrop-blur-md sm:p-8 lg:p-10">
           <div className="grid items-center gap-8 lg:grid-cols-[1.1fr_0.9fr]">
@@ -147,13 +214,20 @@ export default function App() {
               </p>
             </div>
 
-            <div className="relative mx-auto w-full max-w-xl aspect-[7/5] overflow-hidden rounded-3xl border border-blue-300/70 shadow-2xl shadow-blue-400/35">
-              <img src={magicMainIllustration} alt="마법천자문 메인 배경" className="h-full w-full object-cover" />
-              <div className="absolute inset-0 bg-gradient-to-t from-black/45 via-black/10 to-black/20" />
-              <div className="absolute bottom-0 left-0 right-0 h-[85px] bg-black" />
-              <p className="absolute bottom-0 left-0 right-0 flex h-[85px] items-center justify-center px-3 text-center text-xl font-black tracking-wide text-yellow-300 [text-shadow:0_2px_4px_rgba(0,0,0,0.7)] sm:text-2xl lg:text-3xl">
-                수식 마법으로 세상을 구하라!
-              </p>
+            <div className="mx-auto flex w-full max-w-xl flex-col overflow-hidden rounded-3xl border border-blue-300/70 shadow-2xl shadow-blue-400/35">
+              <div className="relative aspect-[7/5] w-full overflow-hidden">
+                <img
+                  src={magicMainIllustration}
+                  alt="마법천자문 메인 배경"
+                  className="h-full w-full object-cover object-center"
+                />
+                <div className="pointer-events-none absolute inset-0 bg-gradient-to-t from-black/35 via-black/5 to-black/15" />
+              </div>
+              <div className="flex min-h-[85px] shrink-0 flex-col justify-center bg-black px-3 py-3 sm:min-h-[90px]">
+                <p className="text-center text-xl font-black tracking-wide text-yellow-300 [text-shadow:0_2px_4px_rgba(0,0,0,0.7)] sm:text-2xl lg:text-3xl">
+                  수식 마법으로 세상을 구하라!
+                </p>
+              </div>
             </div>
           </div>
 
@@ -177,9 +251,17 @@ export default function App() {
                 />
                 <button
                   type="submit"
+                  disabled={isCheckingStudentProgress}
                   className="w-full rounded-xl bg-gradient-to-r from-yellow-400 to-amber-500 px-4 py-3 text-base font-bold text-slate-900 shadow-lg shadow-yellow-500/30 transition hover:brightness-105 active:translate-y-px"
                 >
-                  모험 시작
+                  {isCheckingStudentProgress ? '학습 기록 확인 중...' : '모험 시작'}
+                </button>
+                <button
+                  type="button"
+                  onClick={handleStudentTraining}
+                  className="w-full rounded-xl border-2 border-amber-400 bg-white px-4 py-3 text-base font-bold text-amber-800 shadow-md shadow-amber-400/20 transition hover:bg-amber-50 active:translate-y-px"
+                >
+                  수련 모드 (비계 6단계)
                 </button>
               </form>
             </article>

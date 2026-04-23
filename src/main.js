@@ -5,6 +5,11 @@ import shaoImg from './assets/shao.png'
 import samjangImg from './assets/samjang.png'
 import okdongjaImg from './assets/okdongja.png'
 import 'mathlive'
+import {
+  createTrainingLaunchFromDiagnostic,
+  getCharacterNameForTier,
+  MM_TRAINING_LAUNCH_KEY,
+} from './levelConfig.js'
 
 const app = document.querySelector('#app')
 const directSheetsWebhookUrl =
@@ -1585,14 +1590,26 @@ function renderLevelCheckPlaceholder(problemIdx = 0) {
             </div>
           </div>
           <div class="mm-result-actions">
-            <button type="button" class="mm-btn-secondary mm-btn-w100" id="mm-go-welcome">첫 화면으로</button>
+            <button type="button" class="mm-btn-primary mm-btn-w100" id="mm-start-training">${escapeHtml(getCharacterNameForTier(level))}의 수련 시작하기</button>
           </div>
         </section>
       </main>
     </div>`
 
-    app.querySelector('#mm-go-welcome')?.addEventListener('click', () => {
-      location.hash = '#welcome'
+    app.querySelector('#mm-start-training')?.addEventListener('click', () => {
+      const launch = {
+        ...createTrainingLaunchFromDiagnostic(level, getStudentNicknameFromHash()),
+        resultHeadline: activeProfile.headline,
+        diagnosticTotalScore: total,
+        diagnosticMaxScore: totalMax,
+      }
+      try {
+        sessionStorage.setItem(MM_TRAINING_LAUNCH_KEY, JSON.stringify(launch))
+      } catch (err) {
+        console.warn('[training-launch]', err)
+      }
+      const base = import.meta.env.BASE_URL || '/'
+      window.location.href = new URL('index.html', window.location.origin + base).href
     })
   }
 
