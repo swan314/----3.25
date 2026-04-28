@@ -1,6 +1,6 @@
 import Papa from 'papaparse'
 
-const DEFAULT_TRAINING_CSV_PATH = '/data/수련문제.csv'
+const DEFAULT_TRAINING_CSV_PATH = '/data/training_problems_with_similar_v2.csv'
 const DEFAULT_LEVEL_KEY = '단계'
 
 function normalizeRow(row) {
@@ -13,8 +13,11 @@ function normalizeRow(row) {
   return next
 }
 
-function parseCsvText(text) {
-  if (typeof text !== 'string' || !text.trim()) return []
+export async function loadTrainingCsvRows(csvPath = DEFAULT_TRAINING_CSV_PATH) {
+  const res = await fetch(csvPath)
+  if (!res.ok) throw new Error(`CSV 로드 실패 (${res.status})`)
+  const text = await res.text()
+  const fileName = csvPath.split(/[/\\]/).pop() || csvPath
   const parsed = Papa.parse(text, {
     header: true,
     skipEmptyLines: 'greedy',
@@ -22,14 +25,11 @@ function parseCsvText(text) {
   if (parsed.errors?.length) {
     throw new Error(parsed.errors[0]?.message || 'CSV 파싱 중 오류가 발생했습니다.')
   }
+  if (/training_problems/i.test(fileName)) {
+    console.log('[training-csv] loaded file:', fileName)
+    console.log('[training-csv] headers:', parsed.meta?.fields ?? [])
+  }
   return (parsed.data || []).map(normalizeRow)
-}
-
-export async function loadTrainingCsvRows(csvPath = DEFAULT_TRAINING_CSV_PATH) {
-  const res = await fetch(csvPath)
-  if (!res.ok) throw new Error(`CSV 로드 실패 (${res.status})`)
-  const text = await res.text()
-  return parseCsvText(text)
 }
 
 export function groupTrainingRowsByLevel(rows, levelKey = DEFAULT_LEVEL_KEY) {

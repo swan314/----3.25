@@ -4,13 +4,23 @@
  */
 export const LEARNING_DATA_STAGES_BY_TIER = {
   /** 최상(손오공) */
-  최상: [5, 6],
+  최상: [4, 5, 6],
   /** 상(샤오) */
   상: [3, 4, 5],
   /** 중(삼장) */
   중: [2, 3, 4],
   /** 하(옥동자) */
   하: [1, 2, 3],
+}
+
+/**
+ * 티어별 단계 내 문제 유형 필터.
+ * 키: 단계 번호, 값: 허용할 유형 배열
+ */
+export const LEARNING_STAGE_TYPE_FILTERS_BY_TIER = {
+  최상: {
+    4: ['C', 'D', 'E'],
+  },
 }
 
 /** 진단 결과 티어 → 캐릭터 이름(버튼 문구 등) */
@@ -52,11 +62,14 @@ export function getTrainingCsvPathForStage(stageNumber) {
  * @param {string} nickname
  */
 export function createTrainingLaunchFromDiagnostic(tierKey, nickname) {
+  const stageTypeFilters = LEARNING_STAGE_TYPE_FILTERS_BY_TIER[tierKey]
   return {
     nickname: (nickname || '').trim() || '익명',
     diagnosticTier: tierKey,
+    diagnosticRecord: { level: tierKey },
     characterName: getCharacterNameForTier(tierKey),
     stages: getLearningStagesForTier(tierKey),
+    stageTypeFilters: stageTypeFilters ? structuredClone(stageTypeFilters) : null,
     source: 'diagnostic_final',
     launchedAt: new Date().toISOString(),
   }

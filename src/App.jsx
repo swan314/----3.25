@@ -1,7 +1,19 @@
 import { useEffect, useRef, useState } from 'react'
 import magicMainIllustration from './assets/magic-main-illustration.png'
+import sonGokuImg from './assets/son-goku.png'
+import shaoImg from './assets/shao.png'
+import samjangImg from './assets/samjang.png'
+import okdongjaImg from './assets/okdongja.png'
 import TrainingMode from './TrainingMode'
-import { MM_TRAINING_LAUNCH_KEY, createTrainingLaunchFromDiagnostic } from './levelConfig'
+import {
+  MM_TRAINING_LAUNCH_KEY,
+  createTrainingLaunchFromDiagnostic,
+  getCharacterNameForTier,
+} from './levelConfig'
+import {
+  computeResumeTargetAfterSheetCompletion,
+  isTrainingCompletedSheetRecord,
+} from './training/trainingResumeFromSheet'
 import { fetchStudentLearningProgress } from './sheets'
 
 function decodeJwtPayload(token) {
@@ -30,50 +42,98 @@ export default function App() {
   const [teacherProfile, setTeacherProfile] = useState(null)
   const [teacherAuthError, setTeacherAuthError] = useState('')
   const googleBtnRef = useRef(null)
+  const getLevelFromPlan = (plan) =>
+    String(plan?.diagnosticRecord?.level || plan?.diagnosticTier || '하').trim() || '하'
+
+  /** 진단 직후 세션(`diagnostic_final`)은 첫 방문 안내, 재접속(`student_resume`)은 복귀 안내 */
+  const getIntroVariant = (plan) =>
+    String(plan?.source || '').trim() === 'diagnostic_final' ? 'first' : 'return'
+
+  const buildResumeTrainingPlan = (progress, nickname) => {
+    const tierKey = String(progress.diagnosticTier || progress.diagnosticRecord?.level || '하').trim() || '하'
+    return {
+      ...createTrainingLaunchFromDiagnostic(tierKey, nickname),
+      source: 'student_resume',
+      diagnosticRecord: progress.diagnosticRecord || { level: tierKey },
+      introVariant: 'return',
+      trainingCompletedCount: progress.trainingCompletedCount ?? 0,
+      latestTrainingRecord: progress.latestTrainingRecord ?? null,
+    }
+  }
 
   const handleStudentStart = async (e) => {
-    e.preventDefault(); // 1. 폼이 새로고침되는 것을 막습니다.
-    
-    if (!studentNickname.trim()) {
-      alert("닉네임을 입력해주세요!");
-      return;
-    }
-  
-    setIsCheckingStudentProgress(true); // 2. 로딩 시작
-  
-    try {
-      // 3. 서버(구글 시트)에 데이터가 있는지 조회 (방금 만든 doGet 사용)
-      const response = await fetch(`${import.meta.env.VITE_SHEETS_WEBHOOK_URL}?nickname=${encodeURIComponent(studentNickname.trim())}`);
-      const data = await response.json();
-  
-      // 4. 결과에 따른 분기
-      if (data.found) {
-        // 데이터가 있으면 바로 수련 모드로 이동
-        console.log("기존 데이터 확인됨, 수련 모드로 진입합니다.", data.data);
-        setTrainingPlan(data.data); // 받아온 데이터를 학습 계획에 반영
-        setActiveView('training');  // 수련 화면으로 전환
-      } else {
-        // 데이터가 없으면 진단평가 페이지로 이동 (이 부분은 선생님이 설정하신 기존 페이지 이동 로직으로 바꾸시면 됩니다)
-        console.log("새로운 학생입니다. 진단평가를 시작합니다.");
-        setActiveView('diagnostic'); // 진단평가 화면으로 전환
-      }
-    } catch (error) {
-      console.error("데이터 조회 실패:", error);
-      alert("서버 연결에 실패했습니다. 다시 시도해주세요.");
-    } finally {
-      setIsCheckingStudentProgress(false); // 5. 로딩 종료
-    }
-  };
+    e.preventDefault()
+    console.log('[student-start] submit clicked', {
+      nicknameRaw: studentNickname,
+      activeView,
+    })
 
-  const handleStudentTraining = (event) => {
-    event.preventDefault()
-    const name = studentNickname.trim()
-    if (!name) {
-      window.alert('닉네임을 입력해 주세요.')
+    if (!studentNickname.trim()) {
+      alert('닉네임을 입력해주세요!')
       return
     }
-    setTrainingPlan(null)
-    setActiveView('training')
+
+    const nickname = studentNickname.trim()
+    const moveToDiagnostic = () => {
+      const encodedNickname = encodeURIComponent(nickname)
+      // 진단평가 첫 화면(환영): main.js에서 routeName !== 'level-check' 일 때 renderWelcome()
+      window.location.assign(`/legacy.html#welcome?nickname=${encodedNickname}`)
+    }
+
+    setIsCheckingStudentProgress(true)
+
+    try {
+      console.log('[student-start] fetching progress', { nickname })
+      const progress = await fetchStudentLearningProgress(nickname)
+      console.log('[student-start] progress fetched', progress)
+      if (!progress.hasDiagnosticResult) {
+        moveToDiagnostic()
+        return
+      }
+
+      const resumeBase = buildResumeTrainingPlan(progress, nickname)
+
+      if (!progress.hasTrainingCompletion || !progress.latestTrainingRecord) {
+        setTrainingPlan({
+          ...resumeBase,
+          resumeType: '본문제',
+          resumeProblemNumber: 1,
+        })
+        setActiveView('diagnostic-intro')
+        return
+      }
+
+      const latestTrainingRecord = progress.latestTrainingRecord
+      console.log('[next-problem] latestTrainingRecord (sheet)', latestTrainingRecord)
+
+      if (!isTrainingCompletedSheetRecord(latestTrainingRecord)) {
+        console.warn('[next-problem] latest row is not 수련완료; starting from first 문제')
+        setTrainingPlan({
+          ...resumeBase,
+          resumeType: '본문제',
+          resumeProblemNumber: 1,
+        })
+        setActiveView('diagnostic-intro')
+        return
+      }
+
+      const resumeFields = computeResumeTargetAfterSheetCompletion(latestTrainingRecord)
+      console.log('[next-problem] resume after last 완료 기록만 반영:', resumeFields)
+
+      setTrainingPlan({
+        ...resumeBase,
+        ...resumeFields,
+      })
+      setActiveView('diagnostic-intro')
+      return
+    } catch (error) {
+      console.error('학생 기록 조회 실패', error)
+      window.alert(
+        '기록 조회에 실패했습니다. 네트워크/Apps Script 설정 확인 후 다시 시도해주세요.'
+      )
+    } finally {
+      setIsCheckingStudentProgress(false)
+    }
   }
 
   useEffect(() => {
@@ -84,7 +144,7 @@ export default function App() {
         if (plan?.stages?.length) {
           if (plan.nickname) setStudentNickname(String(plan.nickname))
           setTrainingPlan(plan)
-          setActiveView('training')
+          setActiveView('diagnostic-intro')
           sessionStorage.removeItem(MM_TRAINING_LAUNCH_KEY)
           return
         }
@@ -118,6 +178,8 @@ export default function App() {
     const existingScript = document.querySelector('script[data-google-gsi="true"]')
     const initializeGoogle = () => {
       if (!window.google?.accounts?.id) return
+      const buttonHost = googleBtnRef.current
+      if (!buttonHost) return
 
       window.google.accounts.id.initialize({
         client_id: clientId,
@@ -138,8 +200,8 @@ export default function App() {
         },
       })
 
-      googleBtnRef.current.innerHTML = ''
-      window.google.accounts.id.renderButton(googleBtnRef.current, {
+      buttonHost.innerHTML = ''
+      window.google.accounts.id.renderButton(buttonHost, {
         theme: 'filled_blue',
         size: 'large',
         shape: 'pill',
@@ -164,6 +226,12 @@ export default function App() {
     }
     document.head.appendChild(script)
   }, [activeView])
+
+  useEffect(() => {
+    if (activeView !== 'diagnostic-intro' || !trainingPlan) return
+    const level = getLevelFromPlan(trainingPlan)
+    console.log('[diagnostic-intro] level:', level)
+  }, [activeView, trainingPlan])
 
   const handleTeacherDashboardEnter = () => {
     if (!teacherProfile) {
@@ -194,6 +262,75 @@ export default function App() {
               setActiveView('landing')
             }}
           />
+        )}
+
+        {activeView === 'diagnostic-intro' && trainingPlan && (
+          <section className="mx-auto w-full max-w-3xl rounded-3xl border border-blue-200/80 bg-white/90 p-6 shadow-2xl shadow-blue-300/20 backdrop-blur-md sm:p-8">
+            <div className="space-y-6 text-center">
+              {getIntroVariant(trainingPlan) === 'first' ? (
+                <h2 className="text-3xl font-black text-blue-950 sm:text-4xl">🎉 진단 완료!</h2>
+              ) : (
+                <div className="space-y-1">
+                  <p className="text-2xl font-black text-blue-950 sm:text-3xl">다시 돌아왔군요!</p>
+                  <p className="text-base font-semibold text-slate-600 sm:text-lg">수련을 이어가 볼까요?</p>
+                </div>
+              )}
+              <div>
+                <img
+                  src={
+                    {
+                      최상: sonGokuImg,
+                      상: shaoImg,
+                      중: samjangImg,
+                      하: okdongjaImg,
+                    }[getLevelFromPlan(trainingPlan)] || magicMainIllustration
+                  }
+                  alt={`${getLevelFromPlan(trainingPlan)} 레벨 캐릭터`}
+                  className="mx-auto h-48 w-48 rounded-2xl border border-blue-200 bg-blue-50 object-cover sm:h-56 sm:w-56"
+                />
+              </div>
+              <div className="rounded-2xl border border-blue-100 bg-blue-50/70 p-4 text-left">
+                <p className="text-lg font-black text-blue-900 sm:text-xl">
+                  {`${getCharacterNameForTier(getLevelFromPlan(trainingPlan))}(${getLevelFromPlan(trainingPlan)})`}
+                </p>
+                <p className="mt-2 text-sm leading-relaxed text-slate-700 sm:text-base">
+                  {{
+                    최상: '최고 수준입니다! 어떤 문제도 해결할 수 있습니다.',
+                    상: '잘하고 있습니다! 조금만 더 노력하면 최고 단계입니다.',
+                    중: '기본기를 잘 갖추었습니다. 연습을 통해 더 성장할 수 있어요.',
+                    하: '지금부터 시작입니다! 차근차근 실력을 키워봅시다.',
+                  }[getLevelFromPlan(trainingPlan)] ||
+                    '지금부터 시작입니다! 차근차근 실력을 키워봅시다.'}
+                </p>
+              </div>
+              {getIntroVariant(trainingPlan) === 'return' && (
+                <div className="rounded-2xl border border-slate-200 bg-slate-50/90 px-4 py-3 text-sm text-slate-800 sm:text-base">
+                  <p className="font-bold">
+                    현재까지 완료한 수련 문제: {Number(trainingPlan.trainingCompletedCount ?? 0)}개
+                  </p>
+                  {trainingPlan.latestTrainingRecord?.problem ? (
+                    <p className="mt-1 text-slate-600">
+                      최근 기록 문항: {String(trainingPlan.latestTrainingRecord.problem).trim()}
+                    </p>
+                  ) : null}
+                </div>
+              )}
+              <p className="rounded-2xl border border-amber-300 bg-amber-50 px-4 py-3 text-center text-sm font-bold leading-relaxed text-amber-900 shadow-sm sm:text-base">
+                수련 문제를 해결하면 보상으로 숫자카드를 얻을 수 있습니다.
+                <br />
+                15개의 카드를 모두 모으면 당신은 방정식 마스터가 될 수 있습니다.
+                <br />
+                지금 바로 도전해보세요!
+              </p>
+              <button
+                type="button"
+                onClick={() => setActiveView('training')}
+                className="rounded-xl bg-gradient-to-r from-yellow-400 to-amber-500 px-6 py-3 text-base font-black text-slate-900 shadow-lg shadow-yellow-500/30 transition hover:brightness-105 active:translate-y-px"
+              >
+                {getIntroVariant(trainingPlan) === 'first' ? '수련 시작하기' : '이어 수련하기'}
+              </button>
+            </div>
+          </section>
         )}
 
         {activeView === 'landing' && (
@@ -235,7 +372,7 @@ export default function App() {
             <article className="rounded-2xl border border-yellow-300 bg-white/85 p-5 shadow-lg shadow-yellow-400/20 sm:p-6">
               <h2 className="text-xl font-extrabold text-yellow-600">학생용 입장</h2>
               <p className="mt-2 text-sm text-slate-600">
-                입장 후 기존 진단평가, 채점, 레벨 분석과 캐릭터 결과를 그대로 진행합니다.
+                닉네임을 입력하세요. 방정식 활용 수련을 시작합니다
               </p>
               <form className="mt-4 space-y-3" onSubmit={handleStudentStart}>
                 <label className="block text-sm font-semibold text-slate-700" htmlFor="nickname">
@@ -255,13 +392,6 @@ export default function App() {
                   className="w-full rounded-xl bg-gradient-to-r from-yellow-400 to-amber-500 px-4 py-3 text-base font-bold text-slate-900 shadow-lg shadow-yellow-500/30 transition hover:brightness-105 active:translate-y-px"
                 >
                   {isCheckingStudentProgress ? '학습 기록 확인 중...' : '모험 시작'}
-                </button>
-                <button
-                  type="button"
-                  onClick={handleStudentTraining}
-                  className="w-full rounded-xl border-2 border-amber-400 bg-white px-4 py-3 text-base font-bold text-amber-800 shadow-md shadow-amber-400/20 transition hover:bg-amber-50 active:translate-y-px"
-                >
-                  수련 모드 (비계 6단계)
                 </button>
               </form>
             </article>

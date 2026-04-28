@@ -7,6 +7,8 @@
   --accent: #1d4ed8;
   --accent-bg: rgba(29, 78, 216, 0.14);
   --accent-border: rgba(29, 78, 216, 0.45);
+  /** 진단 헤더 ADVENTURE 줄 (골드) */
+  --mm-adventure-gold: #b8860b;
   --social-bg: rgba(244, 243, 236, 0.5);
   --shadow:
     rgba(29, 78, 216, 0.22) 0 10px 15px -3px, rgba(250, 204, 21, 0.16) 0 4px 6px -2px;
@@ -40,6 +42,7 @@
     --accent: #93c5fd;
     --accent-bg: rgba(147, 197, 253, 0.26);
     --accent-border: rgba(147, 197, 253, 0.62);
+    --mm-adventure-gold: #e8c547;
     --social-bg: rgba(47, 48, 58, 0.5);
     --shadow:
       rgba(59, 130, 246, 0.3) 0 10px 15px -3px, rgba(250, 204, 21, 0.16) 0 4px 6px -2px;
@@ -307,14 +310,37 @@ code {
   box-sizing: border-box;
 }
 
+.mm-shell:has(.mm-top-stack) > .mm-main {
+  flex: 0 1 auto;
+}
+
+.mm-top-stack {
+  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  width: 100%;
+}
+
+.mm-adventure-band {
+  flex: 1 1 auto;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  box-sizing: border-box;
+  min-height: 0;
+  padding: 12px 16px 20px;
+  width: 100%;
+}
+
 .mm-header {
   max-width: 1126px;
   width: 100%;
   margin: 0 auto;
-  padding: 22px 24px;
-  min-height: 118px;
+  padding: 22px 24px 12px;
+  min-height: 0;
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   justify-content: flex-start;
   gap: 12px;
   position: relative;
@@ -325,6 +351,13 @@ code {
   align-items: center;
   gap: 12px;
   justify-content: center;
+}
+
+.mm-brand.mm-brand-left {
+  justify-content: flex-start;
+  flex-shrink: 0;
+  z-index: 1;
+  margin-top: 2cm;
 }
 
 .mm-logo,
@@ -347,32 +380,27 @@ code {
   line-height: 1;
 }
 
-.mm-brand-text {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-}
-
 .mm-title-top {
   color: var(--accent);
   font-weight: 700;
   letter-spacing: -0.3px;
-  font-size: 22px;
+  font-size: 26px;
+  line-height: 1.15;
 }
 
 .mm-title-sub {
   font-family: var(--mono);
-  font-size: 50px;
-  color: var(--accent);
+  font-size: clamp(40px, 7.2vw, 64px);
+  color: var(--mm-adventure-gold);
   font-weight: 700;
-  letter-spacing: -0.2px;
+  letter-spacing: -0.04em;
   opacity: 1;
   text-align: center;
-  position: absolute;
-  left: 50%;
-  transform: translateX(-50%);
-  top: 60%;
-  white-space: nowrap;
+  line-height: 1.05;
+  margin: 0;
+  padding: 0;
+  width: 100%;
+  max-width: min(1126px, calc(100% - 32px));
 }
 
 .mm-badge {
@@ -387,6 +415,11 @@ code {
   position: absolute;
   right: 24px;
   top: 22px;
+  z-index: 2;
+}
+
+.mm-header:has(.mm-brand.mm-brand-left) .mm-badge {
+  top: calc(22px + 2cm);
 }
 
 .mm-main {
@@ -600,18 +633,28 @@ code {
 
 @media (max-width: 1024px) {
   .mm-header {
-    padding: 18px 16px;
-    min-height: 96px;
+    padding: 18px 16px 10px;
+  }
+
+  .mm-adventure-band {
+    padding: 10px 12px 16px;
+  }
+
+  .mm-title-top {
+    font-size: 22px;
   }
 
   .mm-title-sub {
-    font-size: 36px;
-    top: 60%;
+    font-size: clamp(32px, 9vw, 44px);
   }
 
   .mm-badge {
     right: 16px;
     top: 18px;
+  }
+
+  .mm-header:has(.mm-brand.mm-brand-left) .mm-badge {
+    top: calc(18px + 2cm);
   }
 
   .mm-main {

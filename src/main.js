@@ -12,8 +12,54 @@ import {
 } from './levelConfig.js'
 
 const app = document.querySelector('#app')
-const directSheetsWebhookUrl =
-  'https://script.google.com/macros/s/AKfycbxS6jJolgQuiHPwn5s6i_DHekp6bt-Ac-bppWxFQN6hKTEd8BMLsdpCgWNDDNam0ujzvA/exec'
+const API_URL = (import.meta.env.VITE_API_URL || '').toString().trim()
+
+function normalizeScoresArray(raw) {
+  if (!Array.isArray(raw)) return new Array(6).fill(0)
+  const normalized = raw.slice(0, 6).map((v) => (Number(v) > 0 ? 1 : 0))
+  while (normalized.length < 6) normalized.push(0)
+  return normalized
+}
+
+function resolveStageScoresFromSession(payload) {
+  const problemNumber = Number(payload?.problemNumber)
+  if (!Number.isFinite(problemNumber)) return null
+  const problemId = `p${Math.floor(problemNumber)}`
+  const byProblem = window.__mmAssessment?.stageResultScoresByProblem
+  if (!byProblem || typeof byProblem !== 'object') return null
+  return byProblem[problemId] || null
+}
+
+function toSheetRowPayload(payload = {}) {
+  const diagnosticScore = Number.isFinite(Number(payload?.diag_score))
+    ? Number(payload.diag_score)
+    : Number.isFinite(Number(payload?.totalScore))
+      ? Number(payload.totalScore)
+      : 0
+
+  // 진단평가 저장 전용 매핑:
+  // A(nickname), B(level), C(diag_score), D(diag_time), P(status), Q(ai)
+  // E~P(수련 데이터)는 반드시 빈값으로 전송
+  return {
+    nickname: (
+      payload?.nickname ??
+      payload?.닉네임 ??
+      getStudentNicknameFromHash() ??
+      '익명'
+    ).toString(),
+    level: (payload?.level ?? '').toString(),
+    diag_score: diagnosticScore,
+    diag_time: (payload?.diag_time ?? new Date().toISOString()).toString(),
+    item: '',
+    phase: '',
+    scores: [],
+    score: '',
+    totalScore: '',
+    totalHint: '',
+    ai: '',
+    status: 'diagnostic_completed',
+  }
+}
 
 function getStudentNicknameFromHash() {
   const hashRaw = (location.hash || '').replace(/^#/, '')
@@ -25,41 +71,50 @@ function getStudentNicknameFromHash() {
 }
 
 async function saveDataToSheets(payload) {
-  try {
-    await fetch(directSheetsWebhookUrl, {
-      method: 'POST',
-      mode: 'no-cors',
-      headers: {
-        'Content-Type': 'text/plain',
-      },
-      body: JSON.stringify(payload),
-      keepalive: true,
+  const normalizedPayload = toSheetRowPayload(payload)
+  if (normalizedPayload?.status === 'diagnostic_completed') {
+    console.log('[Sheets] normalized diagnostic payload', {
+      nickname: normalizedPayload.nickname,
+      level: normalizedPayload.level,
+      diag_score: normalizedPayload.diag_score,
+      diag_time: normalizedPayload.diag_time,
+      status: normalizedPayload.status,
     })
-    // no-cors 모드에서는 응답 확인이 불가하므로 throw 없으면 성공으로 간주
-    return { ok: true, reason: 'no_cors_assumed_success' }
+    console.log('[Sheets] diagnostic payload json', JSON.stringify(normalizedPayload))
+  }
+  if (!API_URL) {
+    console.warn('[Sheets] saveDataToSheets: no API URL')
+    return { ok: false, reason: 'missing_api_url' }
+  }
+  try {
+    await fetch(API_URL, {
+      method: 'POST',
+      mode: 'no-cors',   // ⭐ 핵심 추가
+      body: JSON.stringify(normalizedPayload),
+    })
+  
+    return { ok: true }
   } catch (error) {
     console.error('[Sheets] saveDataToSheets:error', error)
     return { ok: false, reason: 'network_error', message: error?.message || 'unknown_error' }
   }
-}
-
-async function sendLearningResultToSheet(payload) {
-  return saveDataToSheets(payload)
-}
+} 
 
 function renderWelcome() {
   app.innerHTML = `
   <div class="mm-shell" role="application" aria-label="math-master">
-    <header class="mm-header">
-      <div class="mm-brand">
-        <div class="mm-logo" aria-hidden="true">=</div>
-        <div class="mm-brand-text">
+    <div class="mm-top-stack">
+      <header class="mm-header">
+        <div class="mm-brand mm-brand-left">
+          <div class="mm-logo" aria-hidden="true">=</div>
           <div class="mm-title-top">MAGIC MATH WORLD</div>
-          <div class="mm-title-sub">MAGIC MATH ADVENTURE</div>
         </div>
+        <div class="mm-badge" id="mm-progress-badge">Lv. 진단 준비</div>
+      </header>
+      <div class="mm-adventure-band">
+        <div class="mm-title-sub">MAGIC MATH ADVENTURE</div>
       </div>
-      <div class="mm-badge" id="mm-progress-badge">Lv. 진단 준비</div>
-    </header>
+    </div>
 
     <main class="mm-main">
       <section class="mm-welcome-card" aria-labelledby="mm-welcome-heading">
@@ -111,7 +166,9 @@ function renderWelcome() {
   `
 
   app.querySelector('#mm-start')?.addEventListener('click', () => {
-    location.hash = '#level-check'
+    const nick = getStudentNicknameFromHash()
+    const q = nick ? `?nickname=${encodeURIComponent(nick)}` : ''
+    location.hash = `#level-check${q}`
   })
 
   app.querySelector('#mm-privacy-link')?.addEventListener('click', (e) => {
@@ -126,6 +183,15 @@ function renderLevelCheckPlaceholder(problemIdx = 0) {
   }
   if (!window.__mmAssessment.reportedPasses) {
     window.__mmAssessment.reportedPasses = {}
+  }
+  if (!window.__mmAssessment.stageResultScoresByProblem) {
+    window.__mmAssessment.stageResultScoresByProblem = {}
+  }
+  if (!window.__mmAssessment.hintUsageByProblem) {
+    window.__mmAssessment.hintUsageByProblem = {}
+  }
+  if (!Number.isFinite(Number(window.__mmAssessment.totalHint))) {
+    window.__mmAssessment.totalHint = 0
   }
   if (window.__mmAssessment.reportedFinalCompletion == null) {
     window.__mmAssessment.reportedFinalCompletion = false
@@ -397,10 +463,19 @@ function renderLevelCheckPlaceholder(problemIdx = 0) {
   if (!latexAnswers || latexAnswers.length !== stages.length) latexAnswers = new Array(stages.length).fill('')
   let scores = window.__mmAssessment.scoresByProblem[problem.id]
   if (!scores || scores.length !== stages.length) scores = new Array(stages.length).fill(0)
+  // Step 결과(성공=1, 실패=0) 기록용 배열: 문제 풀이 세션 동안 유지
+  let stageResultScores = window.__mmAssessment.stageResultScoresByProblem[problem.id]
+  if (!Array.isArray(stageResultScores) || stageResultScores.length !== 6) {
+    stageResultScores = new Array(6).fill(0)
+  }
   if (!window.__mmAssessment.latexByProblem) window.__mmAssessment.latexByProblem = {}
+  if (!window.__mmAssessment.hintUsageByProblem[problem.id]) {
+    window.__mmAssessment.hintUsageByProblem[problem.id] = new Array(6).fill(0)
+  }
   window.__mmAssessment.answersByProblem[problem.id] = answers
   window.__mmAssessment.latexByProblem[problem.id] = latexAnswers
   window.__mmAssessment.scoresByProblem[problem.id] = scores
+  window.__mmAssessment.stageResultScoresByProblem[problem.id] = stageResultScores
 
   function getCurrentTotalScore() {
     return problems.reduce((sum, p) => {
@@ -409,50 +484,97 @@ function renderLevelCheckPlaceholder(problemIdx = 0) {
     }, 0)
   }
 
-  async function reportStagePass(stage, stageScore) {
-    if (!stageScore?.ok) return
-    const passKey = `${problem.id}-stage-${stage.id}`
-    if (window.__mmAssessment.reportedPasses[passKey]) return
-    window.__mmAssessment.reportedPasses[passKey] = true
+  function getCurrentTotalHint() {
+    const n = Number(window.__mmAssessment?.totalHint)
+    return Number.isFinite(n) ? n : 0
+  }
 
-    const payload = {
+  function getCurrentPhaseLabel() {
+    // 기본 규칙: 본문제 -> 유사문제 1차 -> 유사문제 2차 순환
+    const phaseLabels = ['본문제', '유사문제 1차', '유사문제 2차']
+    return phaseLabels[problemIdx % phaseLabels.length] || '본문제'
+  }
+
+  function getDefaultAiFeedback(isSuccess) {
+    return isSuccess ? '성공했습니다' : '다시 시도하세요'
+  }
+
+  function buildTrackingPayload(stage, extra = {}) {
+    const safeStage = stage || {}
+    const safeScores = Array.isArray(stageResultScores) ? normalizeScoresArray(stageResultScores) : new Array(6).fill(0)
+    const merged = {
       nickname: getStudentNicknameFromHash() || '익명',
-      userLevel: `${problem.title}-${stage.title} 통과`,
-      problemNumber: problemIdx + 1,
-      stageNumber: stage.id,
-      stageTitle: stage.title,
-      score: getCurrentTotalScore(),
-      completionDate: new Date().toISOString(),
+      item: extra.item ?? problem.id ?? '',
+      phase: extra.phase ?? getCurrentPhaseLabel(),
+      scores: extra.scores ?? safeScores,
+      score: extra.score ?? getCurrentTotalScore(),
+      totalHint: extra.totalHint ?? getCurrentTotalHint(),
+      aiFeedback: extra.aiFeedback ?? '',
+      userLevel: extra.userLevel ?? `${problem.title || ''}-${safeStage.title || ''}`.trim(),
+      problemNumber: extra.problemNumber ?? problemIdx + 1,
+      stageNumber: extra.stageNumber ?? safeStage.id ?? '',
+      stageTitle: extra.stageTitle ?? safeStage.title ?? '',
+      completionDate: extra.completionDate ?? new Date().toISOString(),
+      eventType: extra.eventType ?? '',
     }
-
-    return sendLearningResultToSheet(payload)
+    return merged
   }
 
   async function reportFinalCompletion(level, totalScore) {
     if (window.__mmAssessment.reportedFinalCompletion) return
     window.__mmAssessment.reportedFinalCompletion = true
     const diagnosticLevelByTier = {
-      최상: '최상(손오공)',
-      상: '상(샤오)',
-      중: '중(삼장)',
-      하: '하(옥동자)',
+      최상: '손오공(최상)',
+      상: '샤오(상)',
+      중: '삼장(중)',
+      하: '옥동자(하)',
     }
-    const diagnosticLevel = diagnosticLevelByTier[level] || '하(옥동자)'
-
-    const payload = {
-      eventType: 'diagnostic',
+    const diagnosticLevel = diagnosticLevelByTier[level] || '옥동자(하)'
+    const computedTotalScore = problems.reduce((sum, p) => {
+      const perProblemScores = window.__mmAssessment?.scoresByProblem?.[p.id] || []
+      return sum + p.stages.reduce((acc, _, idx) => acc + Number(perProblemScores[idx] || 0), 0)
+    }, 0)
+    const finalTotalScore = Number.isFinite(Number(computedTotalScore))
+      ? Number(computedTotalScore)
+      : Number.isFinite(Number(totalScore))
+        ? Number(totalScore)
+        : 0
+    const diagnosticPayload = {
       nickname: getStudentNicknameFromHash() || '익명',
-      diagnosticLevel,
-      diagnosticScore: totalScore,
-      userLevel: `진단평가 완료 (${level})`,
-      problemNumber: 'final',
-      stageNumber: 'final',
-      stageTitle: '최종 성취',
-      score: totalScore,
-      completionDate: new Date().toISOString(),
+      level: diagnosticLevel,
+      diag_score: finalTotalScore,
+      diag_time: new Date().toISOString(),
+      status: 'diagnostic_completed',
     }
+    try {
+      const cacheNickname = (diagnosticPayload.nickname || '').trim()
+      if (cacheNickname) {
+        localStorage.setItem(
+          `mm_diag_completed_${cacheNickname}`,
+          JSON.stringify({
+            nickname: cacheNickname,
+            tier: level,
+            level: diagnosticLevel,
+            status: 'diagnostic_completed',
+            diag_score: finalTotalScore,
+            diag_time: diagnosticPayload.diag_time,
+          })
+        )
+      }
+    } catch (cacheError) {
+      console.warn('[Diagnostic] local cache save failed', cacheError)
+    }
+    console.log('[Diagnostic] saveDataToSheets payload', diagnosticPayload)
+    console.log('[Diagnostic] diag_score check', diagnosticPayload.diag_score)
+    console.log('[Diagnostic] payload json', JSON.stringify(diagnosticPayload))
+    const sendResult = await saveDataToSheets(diagnosticPayload)
 
-    return sendLearningResultToSheet(payload)
+    return {
+      ok: Boolean(sendResult?.ok),
+      diagnosticLevel,
+      totalScore,
+      sendResult,
+    }
   }
 
   function normalizeForText(s) {
@@ -970,16 +1092,18 @@ function renderLevelCheckPlaceholder(problemIdx = 0) {
 
   app.innerHTML = `
   <div class="mm-shell" role="application" aria-label="math-master">
-    <header class="mm-header">
-      <div class="mm-brand">
-        <div class="mm-logo" aria-hidden="true">=</div>
-        <div class="mm-brand-text">
+    <div class="mm-top-stack">
+      <header class="mm-header">
+        <div class="mm-brand mm-brand-left">
+          <div class="mm-logo" aria-hidden="true">=</div>
           <div class="mm-title-top">MAGIC MATH WORLD</div>
-          <div class="mm-title-sub">MAGIC MATH ADVENTURE</div>
         </div>
+        <div class="mm-badge" id="mm-progress-badge">Lv. 진단 0/${problems[0].stages.reduce((a, s) => a + s.points, 0)}</div>
+      </header>
+      <div class="mm-adventure-band">
+        <div class="mm-title-sub">MAGIC MATH ADVENTURE</div>
       </div>
-      <div class="mm-badge" id="mm-progress-badge">Lv. 진단 0/${problems[0].stages.reduce((a, s) => a + s.points, 0)}</div>
-    </header>
+    </div>
 
     <main class="mm-main mm-main-steps">
       <section class="mm-steps-card" aria-labelledby="mm-problem-title">
@@ -988,7 +1112,7 @@ function renderLevelCheckPlaceholder(problemIdx = 0) {
             <div class="mm-steps-kicker">${problem.title}</div>
             <h1 class="mm-steps-title" id="mm-problem-title">단계별 풀이 입력</h1>
           </div>
-          <button type="button" class="mm-ghost-btn" id="mm-back">첫 화면</button>
+          <button type="button" class="mm-ghost-btn" id="mm-scratchpad-open">연습장</button>
         </div>
 
         <div class="mm-problem-block" role="region" aria-label="문제">
@@ -1099,8 +1223,163 @@ function renderLevelCheckPlaceholder(problemIdx = 0) {
   </div>
   `
 
-  app.querySelector('#mm-back')?.addEventListener('click', () => {
-    location.hash = '#welcome'
+  function openScratchPad() {
+    const existing = document.getElementById('mm-legacy-scratchpad')
+    if (existing) {
+      existing.style.display = 'block'
+      return
+    }
+
+    const panel = document.createElement('div')
+    panel.id = 'mm-legacy-scratchpad'
+    panel.style.cssText =
+      'position:fixed;right:16px;bottom:16px;z-index:9999;width:min(50vw,760px);min-width:360px;max-width:96vw;background:#fff;border:1px solid #cbd5e1;border-radius:16px;box-shadow:0 16px 30px rgba(2,6,23,0.2);padding:12px;'
+
+    panel.innerHTML = `
+      <div id="mm-sp-dragbar" style="display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:10px;cursor:move;border:1px solid #e2e8f0;background:#f8fafc;border-radius:10px;padding:6px 8px;">
+        <strong style="font-size:15px;color:#0f172a;">연습장</strong>
+        <div style="display:flex;gap:6px;flex-wrap:wrap;">
+          <button type="button" id="mm-sp-pen" style="border:1px solid #93c5fd;background:#eff6ff;color:#1d4ed8;border-radius:8px;padding:6px 10px;font-weight:700;">펜</button>
+          <button type="button" id="mm-sp-eraser" style="border:1px solid #e2e8f0;background:#fff;color:#334155;border-radius:8px;padding:6px 10px;font-weight:700;">지우개</button>
+          <button type="button" id="mm-sp-clear" style="border:1px solid #e2e8f0;background:#fff;color:#334155;border-radius:8px;padding:6px 10px;font-weight:700;">전체 지우기</button>
+          <button type="button" id="mm-sp-close" style="border:none;background:#0f172a;color:#fff;border-radius:8px;padding:6px 10px;font-weight:700;">닫기</button>
+        </div>
+      </div>
+      <div id="mm-sp-canvas-wrap" style="height:54vh;min-height:300px;border:1px solid #cbd5e1;border-radius:12px;overflow:hidden;background:#fff;">
+        <canvas id="mm-sp-canvas" style="width:100%;height:100%;touch-action:none;"></canvas>
+      </div>
+    `
+    document.body.appendChild(panel)
+
+    const canvas = panel.querySelector('#mm-sp-canvas')
+    const wrap = panel.querySelector('#mm-sp-canvas-wrap')
+    const dragBar = panel.querySelector('#mm-sp-dragbar')
+    const penBtn = panel.querySelector('#mm-sp-pen')
+    const eraserBtn = panel.querySelector('#mm-sp-eraser')
+    const clearBtn = panel.querySelector('#mm-sp-clear')
+    const closeBtn = panel.querySelector('#mm-sp-close')
+    if (!canvas || !wrap || !dragBar || !penBtn || !eraserBtn || !clearBtn || !closeBtn) return
+
+    const dpr = window.devicePixelRatio || 1
+    const rect = wrap.getBoundingClientRect()
+    canvas.width = Math.max(1, Math.floor(rect.width * dpr))
+    canvas.height = Math.max(1, Math.floor(rect.height * dpr))
+    const ctx = canvas.getContext('2d')
+    if (!ctx) return
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
+    ctx.fillStyle = '#ffffff'
+    ctx.fillRect(0, 0, rect.width, rect.height)
+    ctx.lineCap = 'round'
+    ctx.lineJoin = 'round'
+
+    let tool = 'pen'
+    let drawing = false
+    const getPoint = (event) => {
+      const r = canvas.getBoundingClientRect()
+      return { x: event.clientX - r.left, y: event.clientY - r.top }
+    }
+    const draw = (event) => {
+      if (!drawing) return
+      const { x, y } = getPoint(event)
+      if (tool === 'eraser') {
+        ctx.globalCompositeOperation = 'destination-out'
+        ctx.lineWidth = 18
+      } else {
+        ctx.globalCompositeOperation = 'source-over'
+        ctx.strokeStyle = '#0f172a'
+        ctx.lineWidth = 2
+      }
+      ctx.lineTo(x, y)
+      ctx.stroke()
+    }
+    canvas.addEventListener('pointerdown', (event) => {
+      drawing = true
+      const { x, y } = getPoint(event)
+      canvas.setPointerCapture?.(event.pointerId)
+      ctx.beginPath()
+      ctx.moveTo(x, y)
+    })
+    canvas.addEventListener('pointermove', draw)
+    ;['pointerup', 'pointerleave', 'pointercancel'].forEach((name) => {
+      canvas.addEventListener(name, (event) => {
+        drawing = false
+        canvas.releasePointerCapture?.(event.pointerId)
+      })
+    })
+
+    penBtn.addEventListener('click', () => {
+      tool = 'pen'
+      penBtn.style.borderColor = '#93c5fd'
+      penBtn.style.background = '#eff6ff'
+      penBtn.style.color = '#1d4ed8'
+      eraserBtn.style.borderColor = '#e2e8f0'
+      eraserBtn.style.background = '#fff'
+      eraserBtn.style.color = '#334155'
+    })
+    eraserBtn.addEventListener('click', () => {
+      tool = 'eraser'
+      eraserBtn.style.borderColor = '#fcd34d'
+      eraserBtn.style.background = '#fffbeb'
+      eraserBtn.style.color = '#b45309'
+      penBtn.style.borderColor = '#e2e8f0'
+      penBtn.style.background = '#fff'
+      penBtn.style.color = '#334155'
+    })
+    clearBtn.addEventListener('click', () => {
+      const r = canvas.getBoundingClientRect()
+      ctx.globalCompositeOperation = 'source-over'
+      ctx.fillStyle = '#ffffff'
+      ctx.fillRect(0, 0, r.width, r.height)
+    })
+    closeBtn.addEventListener('click', () => {
+      panel.style.display = 'none'
+    })
+
+    const dragState = {
+      dragging: false,
+      pointerId: null,
+      startX: 0,
+      startY: 0,
+      originRight: 16,
+      originBottom: 16,
+    }
+
+    dragBar.addEventListener('pointerdown', (event) => {
+      if (event.target instanceof Element && event.target.closest('button')) return
+      if (event.button !== 0 && event.pointerType !== 'touch' && event.pointerType !== 'pen') return
+      dragState.dragging = true
+      dragState.pointerId = event.pointerId ?? null
+      dragState.startX = event.clientX
+      dragState.startY = event.clientY
+      dragState.originRight = Number.parseFloat(panel.style.right || '16') || 16
+      dragState.originBottom = Number.parseFloat(panel.style.bottom || '16') || 16
+      dragBar.setPointerCapture?.(event.pointerId)
+    })
+
+    dragBar.addEventListener('pointermove', (event) => {
+      if (!dragState.dragging) return
+      if (dragState.pointerId != null && event.pointerId !== dragState.pointerId) return
+      const dx = event.clientX - dragState.startX
+      const dy = event.clientY - dragState.startY
+      const nextRight = Math.max(8, dragState.originRight - dx)
+      const nextBottom = Math.max(8, dragState.originBottom - dy)
+      panel.style.right = `${nextRight}px`
+      panel.style.bottom = `${nextBottom}px`
+    })
+
+    ;['pointerup', 'pointercancel', 'pointerleave'].forEach((name) => {
+      dragBar.addEventListener(name, (event) => {
+        if (!dragState.dragging) return
+        if (dragState.pointerId != null && event.pointerId !== dragState.pointerId) return
+        dragState.dragging = false
+        dragState.pointerId = null
+        dragBar.releasePointerCapture?.(event.pointerId)
+      })
+    })
+  }
+
+  app.querySelector('#mm-scratchpad-open')?.addEventListener('click', () => {
+    openScratchPad()
   })
 
   app.querySelector('#mm-home-link')?.addEventListener('click', (e) => {
@@ -1521,11 +1800,7 @@ function renderLevelCheckPlaceholder(problemIdx = 0) {
     }
 
     const activeProfile = levelProfiles[level]
-    const finalSendResult = await reportFinalCompletion(level, total)
-    if (!finalSendResult?.ok) {
-      alert(`최종 결과 전송 실패: ${finalSendResult?.reason || 'unknown_error'}`)
-      return
-    }
+    await reportFinalCompletion(level, total)
     const levelAvatarImg = {
       최상: { src: sonGokuImg, alt: '최상 캐릭터 손오공' },
       상: { src: shaoImg, alt: '상 캐릭터 샤오' },
@@ -1537,16 +1812,18 @@ function renderLevelCheckPlaceholder(problemIdx = 0) {
 
     app.innerHTML = `
     <div class="mm-shell" role="application" aria-label="math-master">
-      <header class="mm-header">
-        <div class="mm-brand">
-          <div class="mm-logo" aria-hidden="true">=</div>
-          <div class="mm-brand-text">
+      <div class="mm-top-stack">
+        <header class="mm-header">
+          <div class="mm-brand mm-brand-left">
+            <div class="mm-logo" aria-hidden="true">=</div>
             <div class="mm-title-top">MAGIC MATH WORLD</div>
-            <div class="mm-title-sub">MAGIC MATH ADVENTURE</div>
           </div>
+          <div class="mm-badge">최종 성취 ${total}/${totalMax}</div>
+        </header>
+        <div class="mm-adventure-band">
+          <div class="mm-title-sub">MAGIC MATH ADVENTURE</div>
         </div>
-        <div class="mm-badge">최종 성취 ${total}/${totalMax}</div>
-      </header>
+      </div>
       <main class="mm-main">
         <section class="mm-result-card mm-final-wrap">
           <div class="mm-final-hero mm-final-hero-split" role="region" aria-label="진단 결과 요약">
@@ -1591,6 +1868,7 @@ function renderLevelCheckPlaceholder(problemIdx = 0) {
           </div>
           <div class="mm-result-actions">
             <button type="button" class="mm-btn-primary mm-btn-w100" id="mm-start-training">${escapeHtml(getCharacterNameForTier(level))}의 수련 시작하기</button>
+            <button type="button" class="mm-btn-secondary mm-btn-w100" id="mm-exit-diagnostic">나가기</button>
           </div>
         </section>
       </main>
@@ -1608,6 +1886,10 @@ function renderLevelCheckPlaceholder(problemIdx = 0) {
       } catch (err) {
         console.warn('[training-launch]', err)
       }
+      const base = import.meta.env.BASE_URL || '/'
+      window.location.href = new URL('index.html', window.location.origin + base).href
+    })
+    app.querySelector('#mm-exit-diagnostic')?.addEventListener('click', () => {
       const base = import.meta.env.BASE_URL || '/'
       window.location.href = new URL('index.html', window.location.origin + base).href
     })
@@ -1698,44 +1980,24 @@ function renderLevelCheckPlaceholder(problemIdx = 0) {
       answers[stageIndex] = studentInput
       const gradedCurrentStage = scoreStage(stage, studentInput)
       scores[stageIndex] = gradedCurrentStage.score
-      const stagePassPromise = reportStagePass(stage, gradedCurrentStage)
+      stageResultScores[stageIndex] = gradedCurrentStage.ok ? 1 : 0
 
     // 단계별 즉시 피드백은 숨기고, 마지막 단계에서 한꺼번에 채점 결과를 보여줌
       feedbackEl.textContent = ''
 
       const isLast = stageIndex === stages.length - 1
       if (!isLast) {
-        // 다음 단계 화면은 즉시 이동, 시트 전송은 백그라운드 처리
-        stagePassPromise.catch((err) => console.warn('[Sheets] stage pass send failed', err))
+        // 다음 단계 화면은 즉시 이동 (단계별 전송 없음)
         stageIndex += 1
         updateStepUI()
         return
       }
 
-      // 마지막 단계는 기존처럼 전송 완료를 대기
-      await stagePassPromise
-
-    // 진단평가(5번 문제) 마지막 "결과 보기" 클릭 시 가장 먼저 강제 전송
-      if (problemIdx === problems.length - 1) {
-      const lastStepSendResult = await saveDataToSheets({
-        nickname: getStudentNicknameFromHash() || '익명',
-        userLevel: '결과 보기 버튼 클릭(최종 문제)',
-        problemNumber: problemIdx + 1,
-        stageNumber: stage.id,
-        stageTitle: stage.title,
-        score: getCurrentTotalScore(),
-        completionDate: new Date().toISOString(),
-      })
-      if (!lastStepSendResult?.ok) {
-        alert(`결과 보기 전송 실패: ${lastStepSendResult?.reason || 'unknown_error'}`)
-        return
-      }
-    }
-
     // 문제 완료 시점에 한꺼번에 채점
       for (let i = 0; i < stages.length; i += 1) {
       const graded = scoreStage(stages[i], answers[i] || '')
       scores[i] = graded.score
+      stageResultScores[i] = graded.ok ? 1 : 0
     }
 
     // 문제 완료 결과 화면 표시(문제별)
@@ -1754,16 +2016,18 @@ function renderLevelCheckPlaceholder(problemIdx = 0) {
       const hasNextProblem = problemIdx < problems.length - 1
       app.innerHTML = `
     <div class="mm-shell" role="application" aria-label="math-master">
-      <header class="mm-header">
-        <div class="mm-brand">
-          <div class="mm-logo" aria-hidden="true">=</div>
-          <div class="mm-brand-text">
-          <div class="mm-title-top">MAGIC MATH WORLD</div>
-            <div class="mm-title-sub">MAGIC MATH ADVENTURE</div>
+      <div class="mm-top-stack">
+        <header class="mm-header">
+          <div class="mm-brand mm-brand-left">
+            <div class="mm-logo" aria-hidden="true">=</div>
+            <div class="mm-title-top">MAGIC MATH WORLD</div>
           </div>
+          <div class="mm-badge" id="mm-progress-badge">Lv. 진단 완료 ${total}/${totalPoints}</div>
+        </header>
+        <div class="mm-adventure-band">
+          <div class="mm-title-sub">MAGIC MATH ADVENTURE</div>
         </div>
-        <div class="mm-badge" id="mm-progress-badge">Lv. 진단 완료 ${total}/${totalPoints}</div>
-      </header>
+      </div>
 
       <main class="mm-main">
         <section class="mm-result-card" aria-labelledby="mm-result-title">
@@ -1847,7 +2111,13 @@ function renderRoute() {
   const hash = (location.hash || '').replace(/^#/, '')
   const routeName = hash.split('?')[0]
   if (routeName === 'level-check') {
-    window.__mmAssessment = { answersByProblem: {}, scoresByProblem: {} }
+    window.__mmAssessment = {
+      answersByProblem: {},
+      scoresByProblem: {},
+      stageResultScoresByProblem: {},
+      hintUsageByProblem: {},
+      totalHint: 0,
+    }
     renderLevelCheckPlaceholder()
   }
   else renderWelcome()
