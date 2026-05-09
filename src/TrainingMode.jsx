@@ -5,7 +5,13 @@ import sonGokuImg from './assets/son-goku.png'
 import shaoImg from './assets/shao.png'
 import samjangImg from './assets/samjang.png'
 import okdongjaImg from './assets/okdongja.png'
-import { updateSupplement } from './sheets'
+import { normalizeClassCode } from './classCode'
+import { getCharacterNameForTier, resolveCanonicalDiagnosticTier } from './levelConfig'
+import {
+  buildShortCoachingFeedback,
+  postGenerateAiFeedback,
+  updateSupplement,
+} from './sheets'
 import {
   findMatchingTrainingRowIndex,
   normalizeTrainingKind,
@@ -17,8 +23,15 @@ import {
   matchesScaffoldExpected,
   splitByParentheses,
 } from './training/scaffoldUtils'
-import { loadGroupedTrainingData, loadTrainingCsvRows } from './utils/dataLoader'
+import {
+  getMathCardsArray,
+  getMathCardsByProblem,
+  loadGroupedTrainingData,
+  loadMathCardsCsvRows,
+  loadTrainingCsvRows,
+} from './utils/dataLoader'
 import ScratchPadModal from './components/ScratchPadModal'
+import { formatStudentAiFeedbackForDisplay } from './studentAiFeedbackDisplay'
 
 const DEFAULT_CSV_PATH = '/data/training_problems_with_similar_v2.csv'
 const DEFAULT_HINTS_CSV_PATH = '/data/hints_structured.csv'
@@ -30,6 +43,16 @@ const STAGE_DEF = [
   { qKey: '비계4(방정식 세우기)', aKey: '비계4 정답' },
   { qKey: '비계5(방정식 풀기)', aKey: '비계5 정답' },
   { qKey: '비계6(답 구하기)', aKey: '비계6 정답' },
+]
+
+/** AI 피드백용 6단계 의미(교육적 정의 — 표시 라벨과 별개) */
+const TRAINING_STEP_MEANINGS = [
+  '무엇을 구하는지 파악',
+  '미지수 설정',
+  '문제 상황을 식으로 표현',
+  '방정식 세우기',
+  '방정식 풀이',
+  '구한 값을 문제 상황에 맞게 해석',
 ]
 
 const POSITIVE_FEEDBACK = [
@@ -44,6 +67,46 @@ const TRAINING_COMPLETION_MESSAGES = [
   '이제 어떤 방정식도 해결할 수 있습니다!',
   '당신은 스스로 해낸 경험을 얻었습니다.',
 ]
+
+const MATH_CARD_COLLECTION_KEY = 'mathCardCollection'
+
+function readStoredMathCardCollection() {
+  if (typeof window === 'undefined') return []
+  try {
+    const raw = window.localStorage.getItem(MATH_CARD_COLLECTION_KEY)
+    if (!raw) return []
+    const parsed = JSON.parse(raw)
+    if (!Array.isArray(parsed)) return []
+    return [...new Set(parsed.map((v) => String(v || '').trim()).filter(Boolean))]
+  } catch (_) {
+    return []
+  }
+}
+
+function writeStoredMathCardCollection(codes) {
+  if (typeof window === 'undefined') return
+  try {
+    const unique = [...new Set((codes || []).map((v) => String(v || '').trim()).filter(Boolean))]
+    window.localStorage.setItem(MATH_CARD_COLLECTION_KEY, JSON.stringify(unique))
+  } catch (_) {
+    // ignore localStorage error
+  }
+}
+
+export function shouldAwardMathCard(type, total) {
+  const normalizedType = normalizeTrainingKind(type)
+  const score = Number(total)
+
+  if (normalizedType === '본문제') return Number.isFinite(score) && score >= 5
+  if (normalizedType === '유사문제1') return Number.isFinite(score) && score >= 5
+  if (normalizedType === '유사문제2') return true
+  return false
+}
+
+/** 네트워크 실패 시 — 서버 응답 없이 로컬 단계 템플릿만 사용 */
+function buildLocalTrainingAiFallback(_totalScore, aiPayload) {
+  return buildShortCoachingFeedback('', aiPayload)
+}
 
 /** 숫자카드 15종 (텍스트 목록용) */
 const NUMBER_CARD_NAMES = [
@@ -73,9 +136,53 @@ function hintColumnsFromFlags(flags) {
   return o
 }
 
+function showSimpleNoticeDialog(title, message) {
+  if (typeof document === 'undefined') return
+  const existing = document.getElementById('mm-notice-dialog-overlay')
+  if (existing) existing.remove()
+
+  const overlay = document.createElement('div')
+  overlay.id = 'mm-notice-dialog-overlay'
+  overlay.style.cssText =
+    'position:fixed;inset:0;background:rgba(15,23,42,0.35);display:flex;align-items:center;justify-content:center;z-index:9999;padding:16px;'
+
+  const card = document.createElement('div')
+  card.style.cssText =
+    'width:min(560px,95vw);background:#fff;border-radius:16px;box-shadow:0 20px 40px rgba(2,6,23,0.22);padding:18px 18px 14px;'
+
+  const titleEl = document.createElement('div')
+  titleEl.textContent = title || '안내'
+  titleEl.style.cssText = 'font-weight:800;color:#0f172a;font-size:18px;margin-bottom:10px;'
+
+  const body = document.createElement('div')
+  body.style.cssText = 'color:#334155;line-height:1.7;font-size:15px;white-space:pre-wrap;'
+  body.textContent = String(message || '')
+
+  const footer = document.createElement('div')
+  footer.style.cssText = 'display:flex;justify-content:flex-end;margin-top:14px;'
+
+  const closeBtn = document.createElement('button')
+  closeBtn.type = 'button'
+  closeBtn.textContent = '확인'
+  closeBtn.style.cssText =
+    'border:none;border-radius:10px;background:#111827;color:#fff;font-weight:700;padding:8px 14px;cursor:pointer;'
+  closeBtn.addEventListener('click', () => overlay.remove())
+
+  footer.appendChild(closeBtn)
+  card.appendChild(titleEl)
+  card.appendChild(body)
+  card.appendChild(footer)
+  overlay.appendChild(card)
+  overlay.addEventListener('click', (event) => {
+    if (event.target === overlay) overlay.remove()
+  })
+  document.body.appendChild(overlay)
+}
+
 /**
  * @typedef {{
  *   nickname?: string,
+ *   classCode?: string,
  *   diagnosticTier?: string,
  *   characterName?: string,
  *   stages?: number[],
@@ -87,7 +194,14 @@ function hintColumnsFromFlags(flags) {
  * }} TrainingPlan
  */
 
-export default function TrainingMode({ nickname, onExit, trainingPlan = null }) {
+export default function TrainingMode({
+  nickname,
+  classCode,
+  onExit,
+  trainingPlan = null,
+  /** 관리자·미리보기 등에서만 true. 학생 기본 경로에서는 false 유지. */
+  allowTrainingProblemPicker = false,
+}) {
   const [rows, setRows] = useState([])
   const [hintsData, setHintsData] = useState([])
   const [isLoading, setIsLoading] = useState(true)
@@ -118,7 +232,14 @@ export default function TrainingMode({ nickname, onExit, trainingPlan = null }) 
   const [lastCompletedTotalScore, setLastCompletedTotalScore] = useState(0)
   /** 마지막(6/6) 결과보기 클릭 전, 저장 대기 중 페이로드 */
   const [pendingSavePayload, setPendingSavePayload] = useState(null)
+  /** Apps Script에서 받은 수련 AI 피드백 (결과 화면 표시 + 시트 ai 열) */
+  const [trainingAiFeedback, setTrainingAiFeedback] = useState('')
+  const [isAwaitingTrainingAi, setIsAwaitingTrainingAi] = useState(false)
   const [completionEncouragement, setCompletionEncouragement] = useState('')
+  const [awardedMathCardPopup, setAwardedMathCardPopup] = useState(null)
+  const [isMathCardCollectionOpen, setIsMathCardCollectionOpen] = useState(false)
+  const [mathCardCatalog, setMathCardCatalog] = useState([])
+  const [mathCardCollection, setMathCardCollection] = useState(() => readStoredMathCardCollection())
   const blankLogTimer = useRef(null)
   const textInputRef = useRef(null)
   const mathFieldHostRef = useRef(null)
@@ -156,9 +277,60 @@ export default function TrainingMode({ nickname, onExit, trainingPlan = null }) 
     setCompletionEncouragement('')
     setLastCompletedTotalScore(0)
     setPendingSavePayload(null)
+    setTrainingAiFeedback('')
+    setIsAwaitingTrainingAi(false)
+    setAwardedMathCardPopup(null)
+    setIsMathCardCollectionOpen(false)
     savedTrainingKeysRef.current = new Set()
     revealedStudentAnswerByStepRef.current = {}
   }, [trainingPlan?.launchedAt])
+
+  useEffect(() => {
+    let cancelled = false
+    ;(async () => {
+      try {
+        const cards = await loadMathCardsCsvRows()
+        if (cancelled) return
+        setMathCardCatalog(Array.isArray(cards) ? cards : [])
+      } catch (error) {
+        console.warn('[math card] catalog load failed:', error)
+      }
+    })()
+    return () => {
+      cancelled = true
+    }
+  }, [])
+
+  const mathCardCollectionSet = useMemo(
+    () => new Set((mathCardCollection || []).map((v) => String(v || '').trim()).filter(Boolean)),
+    [mathCardCollection]
+  )
+
+  const mathCardCollectionSlots = useMemo(() => {
+    const sortedCards = [...(mathCardCatalog || [])].sort((a, b) =>
+      String(a?.code || '').localeCompare(String(b?.code || ''), 'ko', { numeric: true })
+    )
+    const acquiredCards = sortedCards.filter((card) => mathCardCollectionSet.has(String(card?.code || '').trim()))
+    const lockedCards = sortedCards.filter((card) => !mathCardCollectionSet.has(String(card?.code || '').trim()))
+    const merged = [...acquiredCards, ...lockedCards].slice(0, 15)
+    while (merged.length < 15) merged.push(null)
+    return merged
+  }, [mathCardCatalog, mathCardCollectionSet])
+
+  const acquiredMathCardCount = useMemo(
+    () => mathCardCollectionSlots.filter((card) => card && mathCardCollectionSet.has(String(card?.code || '').trim())).length,
+    [mathCardCollectionSlots, mathCardCollectionSet]
+  )
+
+  const addMathCardToCollection = useCallback((card) => {
+    const code = String(card?.code || '').trim()
+    if (!code) return
+    setMathCardCollection((prev) => {
+      const next = [...new Set([...(prev || []), code])]
+      writeStoredMathCardCollection(next)
+      return next
+    })
+  }, [])
 
   useEffect(() => {
     let cancelled = false
@@ -317,6 +489,23 @@ export default function TrainingMode({ nickname, onExit, trainingPlan = null }) 
   ])
 
   const row = rows[problemIdx] || null
+
+  const showDevProblemPicker =
+    allowTrainingProblemPicker === true ||
+    String(import.meta.env?.VITE_DEV_MODE || '').toLowerCase() === 'true'
+
+  const currentTrainingProblemSummary = useMemo(() => {
+    if (!row) return ''
+    const stageRaw =
+      row.__poolStage != null && Number.isFinite(Number(row.__poolStage))
+        ? String(row.__poolStage)
+        : String(row['단계'] ?? '').trim()
+    const typeLetter = String(row['유형'] ?? '').trim().toUpperCase()
+    const kind = normalizeTrainingKind(row?.type) || '본문제'
+    const code =
+      stageRaw && typeLetter ? `${stageRaw}-${typeLetter}` : stageRaw || typeLetter || '—'
+    return `현재 수련 문제: ${code} / ${kind}`
+  }, [row])
   const isFinalStepLocked =
     stepIdx === STAGE_DEF.length - 1 &&
     (answerCheckState === 'correct' || answerCheckState === 'revealed')
@@ -749,7 +938,10 @@ export default function TrainingMode({ nickname, onExit, trainingPlan = null }) 
     const triggerMessage = usedHintAtCurrentStep
       ? '힌트 사용 후 오답 2회'
       : '힌트 미사용 오답 3회'
-    window.alert(`${triggerMessage}로 정답을 제공합니다.\n정답: ${revealedAnswer || '정답 정보 없음'}`)
+    showSimpleNoticeDialog(
+      '안내',
+      `${triggerMessage}로 정답을 제공합니다.\n정답: ${revealedAnswer || '정답 정보 없음'}`
+    )
     window.setTimeout(() => {
       handleNext({ forceProceed: true })
     }, 0)
@@ -942,34 +1134,104 @@ export default function TrainingMode({ nickname, onExit, trainingPlan = null }) 
     setLastCompletedTotalScore(totalScore)
 
     const trainingType = normalizeTrainingKind(row?.type) || '본문제'
-    const savePayload = {
-      닉네임: nickname,
-      type: trainingType,
-      단계: row?.__poolStage ?? row?.['단계'] ?? '',
-      문제번호: problemIdx + 1,
-      problem: problemCode,
-      ...stepAnswerPayload,
-      total: totalScore,
-      hint: hintUsageCount,
-      ai: '성공했습니다',
-      completedAt: new Date().toISOString(),
-    }
     const saveKey = `${problemCode}|${trainingType}`
+    const awardMathCard = shouldAwardMathCard(trainingType, totalScore)
+    let awardedCard = null
+    if (awardMathCard) {
+      console.log('[math card] award:', problemCode)
+      try {
+        const matchedCards = await getMathCardsByProblem(problemCode)
+        const picked = Array.isArray(matchedCards) ? matchedCards[0] : null
+        if (picked) {
+          addMathCardToCollection(picked)
+          const sameRarityCount = getMathCardsArray().filter(
+            (card) => Number(card?.rarity) === Number(picked?.rarity)
+          ).length
+          awardedCard = {
+            ...picked,
+            rarityCount: sameRarityCount,
+          }
+        }
+      } catch (error) {
+        console.warn('[math card] load failed:', error)
+      }
+    } else {
+      console.log('[math card] no award:', problemCode)
+    }
     console.log('[save] triggered by result button click')
     const alreadySaved = isSaved || savedTrainingKeysRef.current.has(saveKey)
     console.log('[save] already saved:', alreadySaved)
+
+    const aiPayload = {
+      problemMeta: {
+        code: problemCode,
+        type: trainingType,
+        context: String(row?.['문제 텍스트'] ?? '').trim(),
+      },
+      steps: nextCompletedSteps.map((item, i) => ({
+        index: i + 1,
+        meaning: TRAINING_STEP_MEANINGS[i] || '',
+        question: item.question,
+        correctAnswer: item.correctAnswer,
+        studentAnswer: item.answer,
+        isCorrect: Number(item.processResult) > 0,
+      })),
+      total: totalScore,
+      hint: hintUsageCount,
+    }
+
+    let aiFeedbackText = ''
     if (!alreadySaved) {
+      setIsAwaitingTrainingAi(true)
+      try {
+        const aiRes = await postGenerateAiFeedback(aiPayload)
+        if (aiRes?.ok) {
+          aiFeedbackText = String(aiRes.feedback ?? '').trim()
+          if (!aiFeedbackText) {
+            aiFeedbackText = buildShortCoachingFeedback('', aiPayload)
+          }
+        } else {
+          console.warn('[TrainingMode] AI feedback network/deployment issue', aiRes?.reason || aiRes)
+          aiFeedbackText = buildLocalTrainingAiFallback(totalScore, aiPayload)
+        }
+      } catch (err) {
+        console.warn('[TrainingMode] AI feedback fetch failed', err)
+        aiFeedbackText = buildLocalTrainingAiFallback(totalScore, aiPayload)
+      } finally {
+        setIsAwaitingTrainingAi(false)
+      }
+
+      const savePayload = {
+        닉네임: nickname,
+        classCode: normalizeClassCode(classCode ?? trainingPlan?.classCode),
+        type: trainingType,
+        단계: row?.__poolStage ?? row?.['단계'] ?? '',
+        문제번호: problemIdx + 1,
+        problem: problemCode,
+        ...stepAnswerPayload,
+        total: totalScore,
+        hint: hintUsageCount,
+        ai: aiFeedbackText,
+        completedAt: new Date().toISOString(),
+      }
+
       savedTrainingKeysRef.current.add(saveKey)
       const saveResult = await updateSupplement(savePayload)
       if (saveResult?.ok === false) {
+        savedTrainingKeysRef.current.delete(saveKey)
         window.alert('저장에 실패했습니다. 다시 시도해주세요.')
         return
       }
+      setTrainingAiFeedback(aiFeedbackText)
+    } else {
+      aiFeedbackText = buildLocalTrainingAiFallback(totalScore, aiPayload)
+      setTrainingAiFeedback(aiFeedbackText)
     }
     setPendingSavePayload(null)
     setIsResultReady(false)
     setIsSaved(true)
     setIsResultView(true)
+    setAwardedMathCardPopup(awardedCard)
     console.log('[result-view] opened:', true)
     console.log('[result-view] saved:', true)
   }
@@ -1025,22 +1287,32 @@ export default function TrainingMode({ nickname, onExit, trainingPlan = null }) 
     setIsResultView(false)
     setIsSaved(false)
     setPendingSavePayload(null)
+    setTrainingAiFeedback('')
+    setAwardedMathCardPopup(null)
   }
 
   const learnerName = (nickname || '').trim() || '학습자'
-  const characterName = (trainingPlan?.characterName || '').trim() || '옥동자'
+  const tierForAvatar = resolveCanonicalDiagnosticTier(
+    trainingPlan?.diagnosticTier ||
+      trainingPlan?.diagnosticRecord?.level ||
+      trainingPlan?.characterName ||
+      '하'
+  )
+  const characterName =
+    (trainingPlan?.characterName || '').trim() || getCharacterNameForTier(tierForAvatar)
   const currentStep = Math.min(Math.max(stepIdx + 1, 1), STAGE_DEF.length)
   console.log('[render] isResultView:', isResultView)
   console.log('[render] currentStep:', currentStep)
   console.log('[step-control] currentStep:', currentStep)
   console.log('[step-control] isResultView:', isResultView)
   console.log('[step-control] isResultReady:', isResultReady)
-  const characterCardImage = {
-    손오공: sonGokuImg,
-    샤오: shaoImg,
-    삼장: samjangImg,
-    옥동자: okdongjaImg,
-  }[characterName] || magicMainIllustration
+  const characterCardImage =
+    {
+      최상: sonGokuImg,
+      상: shaoImg,
+      중: samjangImg,
+      하: okdongjaImg,
+    }[tierForAvatar] || magicMainIllustration
   const headerKicker = `학습자: ${learnerName} · 진단 레벨 캐릭터: ${characterName}`
   const softButtonClass =
     'rounded-xl border border-blue-300 bg-white px-4 py-2 text-sm font-bold text-blue-800 transition hover:bg-blue-50 active:translate-y-px'
@@ -1154,39 +1426,132 @@ export default function TrainingMode({ nickname, onExit, trainingPlan = null }) 
 
   return (
     <>
+      {isMathCardCollectionOpen ? (
+        <div className="fixed inset-0 z-[105] flex items-center justify-center bg-slate-900/45 px-4 backdrop-blur-[1px]">
+          <div className="w-auto rounded-3xl border border-violet-300 bg-white p-7 shadow-2xl sm:p-9">
+            <div className="flex items-center justify-between gap-3">
+              <p className="text-lg font-black text-violet-800 sm:text-2xl">카드 보관함</p>
+              <p className="text-base font-semibold text-slate-600 sm:text-lg">
+                획득 {acquiredMathCardCount} / 15
+              </p>
+            </div>
+            <div className="mt-6 grid grid-cols-5 gap-3">
+              {mathCardCollectionSlots.map((card, idx) => {
+                const code = String(card?.code || '').trim()
+                const acquired = Boolean(card && mathCardCollectionSet.has(code))
+                if (acquired) {
+                  return (
+                    <div
+                      key={`card-slot-${code}-${idx}`}
+                      className="flex h-[213px] w-[150px] items-center justify-center overflow-hidden rounded-xl border-2 border-indigo-900 bg-indigo-900 p-1.5"
+                    >
+                      <div className="mx-auto flex h-full w-full items-center justify-center overflow-hidden rounded-lg border-2 border-indigo-800 bg-white">
+                        <img
+                          src={String(card.image || '')}
+                          alt={String(card.name || '매쓰카드')}
+                          className="max-h-full max-w-full object-contain"
+                        />
+                      </div>
+                    </div>
+                  )
+                }
+                return (
+                  <div
+                    key={`card-slot-locked-${idx}`}
+                    className="flex h-[213px] w-[150px] items-center justify-center rounded-xl border-2 border-indigo-900 bg-slate-100"
+                  >
+                    <p className="text-3xl">🔒</p>
+                  </div>
+                )
+              })}
+            </div>
+            <div className="mt-6 flex justify-center">
+              <button
+                type="button"
+                onClick={() => setIsMathCardCollectionOpen(false)}
+                className="rounded-xl bg-slate-900 px-5 py-2 text-sm font-bold text-white transition hover:bg-slate-700"
+              >
+                닫기
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+      {awardedMathCardPopup ? (
+        <div className="fixed inset-0 z-[110] flex items-center justify-center bg-slate-900/45 px-4 backdrop-blur-[1px]">
+          <div className="w-full max-w-md rounded-3xl border border-yellow-300 bg-white p-5 shadow-2xl sm:p-6">
+            <p className="text-center text-[1.6875rem] font-bold leading-tight text-amber-700 sm:text-[1.875rem]">
+              MATH-CARD를 획득했습니다!
+            </p>
+            <div className="mt-6 flex justify-center">
+              <div className="math-card-glow mx-auto flex h-[340px] w-[240px] shrink-0 items-center justify-center overflow-hidden rounded-2xl border border-amber-300 bg-white">
+                <img
+                  src={String(awardedMathCardPopup.image || '')}
+                  alt={String(awardedMathCardPopup.name || '매쓰카드')}
+                  className="max-h-full max-w-full object-contain"
+                />
+              </div>
+            </div>
+            <div className="mt-6 flex justify-center">
+              <button
+                type="button"
+                onClick={() => setAwardedMathCardPopup(null)}
+                className="rounded-xl bg-slate-900 px-5 py-2 text-sm font-bold text-white transition hover:bg-slate-700"
+              >
+                닫기
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+      {isAwaitingTrainingAi ? (
+        <div className="fixed inset-0 z-[100] flex items-center justify-center bg-slate-900/30 px-4 backdrop-blur-[2px]">
+          <p className="rounded-2xl border border-blue-200 bg-white px-6 py-4 text-center text-sm font-bold text-slate-800 shadow-xl">
+            보리도사의 꿀팁을 준비하는 중...
+          </p>
+        </div>
+      ) : null}
       <section className="rounded-3xl border border-blue-200/80 bg-white/90 p-4 shadow-2xl backdrop-blur-md sm:p-6 lg:p-8">
       <div className="grid gap-4 lg:grid-cols-[1fr_auto] lg:items-end">
         <div>
           <p className="text-xs font-semibold text-blue-700 sm:text-sm">{headerKicker}</p>
           <h2 className="mt-1 text-xl font-black text-blue-950 sm:text-2xl lg:text-3xl">방정식의 활용 수련</h2>
           <div className="mt-4 flex flex-wrap items-center gap-2.5 sm:mt-5 sm:gap-3">
-            <label className="text-xs font-semibold text-slate-700 sm:text-sm" htmlFor="training-problem">
-              문항
-            </label>
-            <select
-              id="training-problem"
-              className="rounded-lg border border-slate-300 bg-white px-2.5 py-2 text-xs font-semibold sm:px-3 sm:text-sm"
-              value={problemIdx}
-              onChange={(e) => {
-                setProblemIdx(Number(e.target.value))
-                setStepIdx(0)
-                setHintFlags(Array(6).fill(false))
-              }}
-            >
-              {rows.map((r, i) => (
-                <option
-                  key={`${r.__poolStage ?? 'x'}-${r['유형'] ?? ''}-${r.type ?? ''}-${i}`}
-                  value={i}
+            <p className="text-xs font-semibold text-slate-800 sm:text-sm">{currentTrainingProblemSummary}</p>
+            {showDevProblemPicker && rows.length > 0 ? (
+              <>
+                <label
+                  className="text-xs font-semibold text-amber-800 sm:text-sm"
+                  htmlFor="training-problem"
                 >
-                  유형 {r['유형'] ?? i + 1}
-                  {r.type ? ` · ${r.type}` : ''}
-                  {r.__poolStage != null ? ` · 학습단계 ${r.__poolStage}` : ''}
-                </option>
-              ))}
-            </select>
-            <span className="text-xs text-slate-500 sm:text-sm">
-              ({problemIdx + 1} / {rows.length})
-            </span>
+                  문항(개발)
+                </label>
+                <select
+                  id="training-problem"
+                  className="rounded-lg border border-amber-400 bg-amber-50 px-2.5 py-2 text-xs font-semibold sm:px-3 sm:text-sm"
+                  value={problemIdx}
+                  onChange={(e) => {
+                    setProblemIdx(Number(e.target.value))
+                    setStepIdx(0)
+                    setHintFlags(Array(6).fill(false))
+                  }}
+                >
+                  {rows.map((r, i) => (
+                    <option
+                      key={`${r.__poolStage ?? 'x'}-${r['유형'] ?? ''}-${r.type ?? ''}-${i}`}
+                      value={i}
+                    >
+                      유형 {r['유형'] ?? i + 1}
+                      {r.type ? ` · ${r.type}` : ''}
+                      {r.__poolStage != null ? ` · 학습단계 ${r.__poolStage}` : ''}
+                    </option>
+                  ))}
+                </select>
+                <span className="text-xs text-slate-500 sm:text-sm">
+                  ({problemIdx + 1} / {rows.length})
+                </span>
+              </>
+            ) : null}
             <span className="text-xs font-semibold text-slate-600 sm:text-sm">힌트 사용 {hintUsageCount}회</span>
           </div>
         </div>
@@ -1206,6 +1571,13 @@ export default function TrainingMode({ nickname, onExit, trainingPlan = null }) 
             className="rounded-xl border border-slate-300 bg-white px-3 py-2 text-xs font-bold text-slate-700 transition hover:bg-slate-50 sm:px-4 sm:text-sm"
           >
             나가기
+          </button>
+          <button
+            type="button"
+            onClick={() => setIsMathCardCollectionOpen(true)}
+            className="rounded-xl border border-violet-300 bg-violet-50 px-3 py-2 text-xs font-bold text-violet-700 transition hover:bg-violet-100 sm:px-4 sm:text-sm"
+          >
+            카드 보관함
           </button>
           <button
             type="button"
@@ -1268,6 +1640,17 @@ export default function TrainingMode({ nickname, onExit, trainingPlan = null }) 
           {isResultView ? (
             <div className="mt-4 space-y-3">
               <p className="text-sm font-bold text-blue-800">6단계 수련을 모두 마쳤습니다.</p>
+              {String(trainingAiFeedback || '').trim() ? (
+                <div className="rounded-2xl border border-indigo-200 bg-indigo-50/90 px-4 py-3 text-left shadow-inner sm:px-5 sm:py-4">
+                  <p className="text-xs font-semibold uppercase tracking-wide text-indigo-700">보리도사의 꿀팁</p>
+                  <p className="mt-2 whitespace-pre-wrap text-sm leading-relaxed text-slate-800 sm:text-base">
+                    {formatStudentAiFeedbackForDisplay(
+                      trainingAiFeedback,
+                      String(row?.['문제 텍스트'] ?? '')
+                    )}
+                  </p>
+                </div>
+              ) : null}
               {nextProblemIndexAfterPass >= 0 ? (
                 <button
                   type="button"

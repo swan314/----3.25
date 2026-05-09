@@ -1,15 +1,40 @@
+import {
+  normalizeClassCode,
+  normalizeTeacherEmailForCompare,
+  readNicknameFromRecord,
+  readStudentQueryParams,
+  recordMatchesLearner,
+} from './classCode.js'
+import { resolveCanonicalDiagnosticTier } from './levelConfig.js'
+
 export const API_URL = (import.meta.env.VITE_API_URL || '').toString().trim()
+
+/** 구글 시트 셀당 최대 약 50,000자 — AI 피드백(ai 열) 저장 시 상한 */
+export const AI_FEEDBACK_STORAGE_MAX_CHARS = 50000
+
+/**
+ * 로컬 개발에서만 `VITE_API_PROXY=/api/gas`(vite.config 프록시)로 POST JSON 응답 수신.
+ * 프로덕션 빌드에서는 항상 `VITE_API_URL` → CORS 시 JSONP 폴백.
+ */
+function resolveAiFeedbackPostUrl() {
+  const p = (import.meta.env.VITE_API_PROXY || '').toString().trim()
+  if (import.meta.env.DEV && p) return p.startsWith('/') ? p : `/${p}`
+  return API_URL
+}
 
 function getNicknameFromHashSafe() {
   try {
-    const hashRaw = (window.location.hash || '').replace(/^#/, '')
-    const queryIndex = hashRaw.indexOf('?')
-    if (queryIndex === -1) return ''
-    const query = hashRaw.slice(queryIndex + 1)
-    const params = new URLSearchParams(query)
-    return (params.get('nickname') || '').trim()
+    return readStudentQueryParams().nickname
   } catch (_) {
     return ''
+  }
+}
+
+function getClassCodeFromHashSafe() {
+  try {
+    return readStudentQueryParams().classCode
+  } catch (_) {
+    return normalizeClassCode()
   }
 }
 
@@ -61,8 +86,11 @@ function toSheetRowPayload(payload = {}) {
   ).toString()
 
   // 수련 저장 전용 매핑:
-  // A(nickname), E~O(수련 데이터), P(status=training_completed), Q(ai)
+  // A(nickname), …, classCode(시트에 매핑), E~O(수련 데이터), P(status=training_completed), Q(ai)
   // B~D(진단 데이터)는 반드시 빈값으로 전송
+  const classCode = normalizeClassCode(
+    payload?.classCode ?? payload?.클래스코드 ?? getClassCodeFromHashSafe()
+  )
   return {
     ...payload,
     nickname: (
@@ -71,6 +99,7 @@ function toSheetRowPayload(payload = {}) {
       getNicknameFromHashSafe() ??
       '익명'
     ).toString(),
+    classCode,
     level: '',
     diag_score: '',
     diag_time: '',
@@ -85,15 +114,6 @@ function toSheetRowPayload(payload = {}) {
     ai,
     status: 'training_completed',
   }
-}
-
-function normalizeTier(raw) {
-  const text = (raw || '').toString().trim()
-  if (!text) return '하'
-  if (text.includes('최상')) return '최상'
-  if (text.includes('상')) return '상'
-  if (text.includes('중')) return '중'
-  return '하'
 }
 
 function toFinitePositiveInt(raw, fallback) {
@@ -135,7 +155,7 @@ function normalizeStatus(raw) {
   return text
 }
 
-function readRecordStatus(record) {
+export function readRecordStatus(record) {
   return normalizeStatus(
     record?.status ??
       record?.상태 ??
@@ -273,7 +293,7 @@ function pickRecord(data) {
       const first = wrapped[0]
       if (first && typeof first === 'object') return { ...data, ...first }
     } else {
-      // 예: { found: true, data: { diagnosticLevel: '중(삼장)', ... } }
+      // 예: { found: true, data: { diagnosticLevel: '삼장(중)' 등 } }
       return { ...data, ...wrapped }
     }
   }
@@ -290,14 +310,30 @@ function hasNumericDiagnosticScore(raw) {
   return Number.isFinite(Number(raw))
 }
 
-function parseProgressFromData(data) {
+function parseProgressFromData(data, learnerFilter = null) {
   console.log('[student-progress] parsed data', data)
-  const records = flattenRecords(data).map((record, idx) => ({
+  let records = flattenRecords(data).map((record, idx) => ({
     ...record,
     __status: readRecordStatus(record),
     __timestamp: toTimestampMs(record, idx),
   }))
   console.log('[student-progress] flattened record count', records.length)
+
+  const filterNick = (learnerFilter?.nickname || '').toString().trim()
+  const filterClass = normalizeClassCode(learnerFilter?.classCode)
+  const classOptional = Boolean(learnerFilter?.classOptional)
+  if (filterNick) {
+    const before = records.length
+    records = records.filter((r) =>
+      recordMatchesLearner(r, filterNick, filterClass, { classOptional })
+    )
+    console.log('[student-progress] learner filter', {
+      nickname: filterNick,
+      classCode: filterClass,
+      before,
+      after: records.length,
+    })
+  }
 
   // 진단 여부는 "진단완료 status 존재 여부"만으로 판단한다.
   const diagnosticRecords = records.filter((record) => record.__status === 'diagnostic_completed')
@@ -327,7 +363,7 @@ function parseProgressFromData(data) {
     parseCombinedProgress(sourceRecord.progress)
   const parsedProblemCode = parseProblemCode(sourceRecord.problem ?? sourceRecord.문항번호 ?? '')
 
-  const diagnosticTier = normalizeTier(
+  const diagnosticTier = resolveCanonicalDiagnosticTier(
     latestDiagnosticRecord?.level ||
       latestDiagnosticRecord?.diagnosticTier ||
       latestDiagnosticRecord?.diagnosticLevel ||
@@ -403,16 +439,458 @@ export async function updateSupplement(payload) {
   }
 }
 
+/** UTF-8 문자열 → Base64 (Apps Script Utilities.base64Decode 호환) */
+function utf8ToBase64(str) {
+  const s = String(str)
+  try {
+    return btoa(unescape(encodeURIComponent(s)))
+  } catch {
+    return btoa(s)
+  }
+}
+
 /**
- * 닉네임 기준으로 기존 진단/학습 진행 기록을 조회합니다.
- * Apps Script 쪽에서 JSON 응답을 제공한다고 가정합니다.
+ * 맥락 객체를 JSON으로 만들고 길이 제한 내에서 잘라 Base64 `payload` 한 개로 전달(JSONP URL 길이 한계 대비).
  */
-export async function fetchStudentLearningProgress(nickname) {
+export function buildTrainingAiFeedbackPayloadBlob(context = {}) {
+  const clamp = (t, n) => (t || '').toString().slice(0, n)
+  const trimSteps = (steps, qLim, aLim) =>
+    (Array.isArray(steps) ? steps : []).map((s) => ({
+      stepNumber: Number(s.stepNumber) || 0,
+      meaning: clamp(s.meaning, 80),
+      success: Boolean(s.success),
+      label: clamp(s.label, 120),
+      questionPreview: clamp(s.questionPreview ?? s.question, qLim),
+      studentAnswer: clamp(s.studentAnswer, aLim),
+      correctAnswer: clamp(s.correctAnswer, aLim),
+    }))
+
+  let problemTextLim = 3500
+  let qaLim = 420
+  let qPrevLim = 280
+  for (let attempt = 0; attempt < 8; attempt += 1) {
+    const blob = {
+      v: 2,
+      problem: clamp(context.problem, 120),
+      trainingType: clamp(context.trainingType ?? context.type, 80),
+      problemText: clamp(context.problemText, problemTextLim),
+      total: Number(context.total) || 0,
+      hint: Number(context.hint ?? context.totalHint) || 0,
+      steps: trimSteps(context.steps, qPrevLim, qaLim),
+    }
+    const json = JSON.stringify(blob)
+    const b64 = utf8ToBase64(json)
+    // 전체 URL 여유(웹앱 주소·callback 등) 고려 ~7500자 상한
+    if (b64.length <= 6800) {
+      return b64
+    }
+    problemTextLim = Math.max(400, Math.floor(problemTextLim * 0.65))
+    qaLim = Math.max(180, Math.floor(qaLim * 0.75))
+    qPrevLim = Math.max(120, Math.floor(qPrevLim * 0.75))
+  }
+  const minimal = {
+    v: 2,
+    problem: clamp(context.problem, 120),
+    trainingType: clamp(context.trainingType ?? context.type, 80),
+    problemText: clamp(context.problemText, 400),
+    total: Number(context.total) || 0,
+    hint: Number(context.hint ?? context.totalHint) || 0,
+    steps: trimSteps(context.steps, 100, 120),
+  }
+  return utf8ToBase64(JSON.stringify(minimal))
+}
+
+/**
+ * generate_ai_feedback용 payload (problemMeta·steps) — GET JSONP용 Base64 (길이 자동 축소)
+ */
+export function buildGenerateAiFeedbackPayloadBlob(aiPayload) {
+  const clamp = (t, n) => (t ?? '').toString().slice(0, n)
+  const metaIn = aiPayload?.problemMeta || {}
+  let textLim = 4200
+  let qaLim = 520
+  let qLim = 360
+  for (let attempt = 0; attempt < 10; attempt += 1) {
+    const blob = {
+      problemMeta: {
+        code: clamp(metaIn.code, 120),
+        type: clamp(metaIn.type, 80),
+        context: clamp(metaIn.context, textLim),
+      },
+      steps: (Array.isArray(aiPayload?.steps) ? aiPayload.steps : []).map((s) => ({
+        index: Number(s.index) || 0,
+        meaning: clamp(s.meaning, 100),
+        question: clamp(s.question, qLim),
+        correctAnswer: clamp(s.correctAnswer, qaLim),
+        studentAnswer: clamp(s.studentAnswer, qaLim),
+        isCorrect: Boolean(s.isCorrect),
+      })),
+      total: Number(aiPayload?.total) || 0,
+      hint: Number(aiPayload?.hint) || 0,
+    }
+    const b64 = utf8ToBase64(JSON.stringify(blob))
+    if (b64.length <= 6800) {
+      return b64
+    }
+    textLim = Math.max(500, Math.floor(textLim * 0.62))
+    qaLim = Math.max(200, Math.floor(qaLim * 0.78))
+    qLim = Math.max(160, Math.floor(qLim * 0.78))
+  }
+  const minimal = {
+    problemMeta: {
+      code: clamp(metaIn.code, 120),
+      type: clamp(metaIn.type, 80),
+      context: clamp(metaIn.context, 450),
+    },
+    steps: (Array.isArray(aiPayload?.steps) ? aiPayload.steps : []).map((s) => ({
+      index: Number(s.index) || 0,
+      meaning: clamp(s.meaning, 80),
+      question: clamp(s.question, 120),
+      correctAnswer: clamp(s.correctAnswer, 140),
+      studentAnswer: clamp(s.studentAnswer, 140),
+      isCorrect: Boolean(s.isCorrect),
+    })),
+    total: Number(aiPayload?.total) || 0,
+    hint: Number(aiPayload?.hint) || 0,
+  }
+  return utf8ToBase64(JSON.stringify(minimal))
+}
+
+function fetchAiFeedbackJsonpV3(aiPayload) {
+  const base = API_URL
+  if (!base) {
+    return Promise.resolve({ ok: false, reason: 'missing_api_url' })
+  }
+  let u
+  try {
+    u = new URL(base, typeof window !== 'undefined' ? window.location.href : 'http://localhost')
+  } catch {
+    return Promise.resolve({ ok: false, reason: 'invalid_api_url' })
+  }
+  u.searchParams.set('action', 'ai_feedback')
+  u.searchParams.set('payload', buildGenerateAiFeedbackPayloadBlob(aiPayload))
+  const cbName = `__mm_ai_cb_${Date.now()}_${Math.floor(Math.random() * 1e9)}`
+  u.searchParams.set('callback', cbName)
+
+  return new Promise((resolve) => {
+    const script = document.createElement('script')
+    const timer = window.setTimeout(() => {
+      cleanup()
+      resolve({ ok: false, reason: 'timeout' })
+    }, 45000)
+    function cleanup() {
+      window.clearTimeout(timer)
+      try {
+        delete window[cbName]
+      } catch {
+        // ignore
+      }
+      if (script.parentNode) script.parentNode.removeChild(script)
+    }
+    window[cbName] = (data) => {
+      cleanup()
+      if (data && typeof data === 'object') {
+        resolve(data)
+      } else {
+        resolve({ ok: false, reason: 'invalid_payload' })
+      }
+    }
+    script.onerror = () => {
+      cleanup()
+      resolve({ ok: false, reason: 'script_error' })
+    }
+    script.src = u.toString()
+    document.head.appendChild(script)
+  })
+}
+
+/** GAS·원문에 수학적 핵심이 드러나 있으면 로컬 단계 템플릿으로 덮어쓰지 않음 */
+function feedbackLooksMathGrounded_(text) {
+  const t = String(text || '').replace(/\s+/g, ' ')
+  if (t.length < 14) return false
+  let score = 0
+  if (/10x\s*\+\s*a|10x\+a/i.test(t)) score += 8
+  if (/x\s*\+\s*1|\(\s*x\s*\)|\bx\s*로\s*(두|설정|잡)|미지수/i.test(t)) score += 5
+  if (/\d+\s*x|\([^)]*x[^)]*\)/i.test(t)) score += 4
+  if (/관계식|방정식/.test(t)) score += 5
+  if (/나타낼\s*수|표현해야|표현해|식으로\s*(잘\s*)?표현|상황을\s*식으로/.test(t)) score += 6
+  if (/몇\s*배|\d+\s*배/.test(t)) score += 3
+  if (/합\s*(이|을|은)|차\s*(이|를|은)|자릿수|식으로|미지수/.test(t)) score += 2
+  return score >= 6
+}
+
+export function buildShortCoachingFeedback(rawFeedback, aiPayload) {
+  const contextText = String(aiPayload?.problemMeta?.context || '').replace(/\s+/g, ' ').trim()
+  const totalScore = Number(aiPayload?.total)
+  const score = Number.isFinite(totalScore)
+    ? Math.max(0, Math.min(6, Math.round(totalScore)))
+    : 0
+  const steps = Array.isArray(aiPayload?.steps) ? aiPayload.steps : []
+  const wrongSteps = steps.filter((s) => !s?.isCorrect)
+  const isAllCorrect = steps.length > 0 && wrongSteps.length === 0
+  const scoreTailByLevel = {
+    0: '다시 한번 해보자 아자아자!',
+    1: '조금씩 감 잡고 있어, 화이팅!',
+    2: '좋아, 한 단계씩 차분히 올려보자!',
+    3: '중요한 흐름은 잡았어, 조금만 더 밀어보자!',
+    4: '조금만 신경쓰면 MATH-CARD를 얻을 수 있어!',
+    5: '아주 좋아! MATH-CARD가 손안에 들어왔어!',
+    6: '완벽해, 이제 MATH-MASTER에 가까워지고 있어!',
+  }
+  const scoreTail = scoreTailByLevel[score] || scoreTailByLevel[0]
+
+  const rawTrim = String(rawFeedback || '').replace(/\s+/g, ' ').trim()
+  if (rawTrim && feedbackLooksMathGrounded_(rawTrim)) {
+    const tailRecent = rawTrim.slice(-45)
+    const alreadyEndsWithCheer =
+      /도전|화이팅|아자아자|MATH-CARD|해볼까|밀어보자|손안에|마스터/.test(tailRecent) ||
+      rawTrim.includes('🙂')
+    const combined = alreadyEndsWithCheer ? rawTrim : `${rawTrim} ${scoreTail}`
+    return combined.trim().slice(0, AI_FEEDBACK_STORAGE_MAX_CHARS).trim()
+  }
+
+  let line1 = '조건을 식으로 한 줄씩 바꾸는 것부터 해보자.'
+  let line2 = '숫자 계산 전에 관계식 먼저 쓰면 훨씬 덜 헷갈려.'
+
+  if (isAllCorrect) {
+    return `이번 문제 흐름 정말 좋았어. 다음 문제도 식을 먼저 세우고 검산까지 해보자. ${scoreTail}`
+      .slice(0, AI_FEEDBACK_STORAGE_MAX_CHARS)
+      .trim()
+  }
+
+  if (!wrongSteps.length) {
+    return `${line1} ${line2} ${scoreTail}`.slice(0, AI_FEEDBACK_STORAGE_MAX_CHARS).trim()
+  }
+
+  const focusWrong = wrongSteps
+    .slice()
+    .sort((a, b) => Number(b?.index || 0) - Number(a?.index || 0))[0]
+  const focusIndex = Number(focusWrong?.index || 0)
+  const maxCorrectIndex = steps
+    .filter((s) => s?.isCorrect)
+    .reduce((m, s) => Math.max(m, Number(s?.index || 0)), 0)
+
+  let prefix = ''
+  if (maxCorrectIndex >= 4 && focusIndex >= 5) {
+    prefix = '관계를 식으로 옮기고 방정식까지 세운 부분은 잘했어. '
+  } else if (maxCorrectIndex >= 3 && focusIndex >= 4) {
+    prefix = '문제 상황을 식으로 나타낸 건 좋았어. '
+  } else if (maxCorrectIndex >= 2 && focusIndex >= 3) {
+    prefix = '앞 단계까지 방향은 좋았어. '
+  }
+
+  const ctx = contextText
+  const mentionsDigits = /두\s*자리|자릿수|십의\s*자리|일의\s*자리/.test(ctx)
+  const mentionsConsecutive = /연속|연이어|다음\s*수|연속하는/.test(ctx)
+  const mentionsMultipleRelation = /몇\s*배|배\s*관계|\d+\s*배|배수/.test(ctx)
+
+  if (focusIndex === 1) {
+    line1 = '문제가 최종적으로 무엇을 구하라고 하는지 한 줄로 적어보자.'
+    line2 = '그 목표를 정해 두면 조건을 식으로 연결하기 쉬워져.'
+  } else if (focusIndex === 2) {
+    line1 = '미지수는 한 번 정하면 끝까지 같은 뜻으로 써보자.'
+    line2 = '예를 들어 십의 자리를 x로 두면 식 전체에서 x 의미를 유지하면 돼.'
+  } else if (focusIndex === 3) {
+    if (mentionsDigits) {
+      line1 = '두 자리 수는 10x+a 꼴로 먼저 놓고 시작해보자.'
+      line2 = '예를 들어 일의 자리가 6이면 10x+6처럼 바로 쓰면 돼.'
+    } else if (mentionsConsecutive) {
+      line1 = '연속한 수는 x, x+1처럼 먼저 잡고 식을 세워보자.'
+      line2 = '합이나 차 조건은 x와 x+1에 그대로 넣으면 돼.'
+    } else if (mentionsMultipleRelation) {
+      line1 = '몇 배 관계는 a=kb 꼴로 먼저 써보자.'
+      line2 = '예를 들어 3배면 a=3b처럼 쓰고, 다른 조건식과 이어 보면 돼.'
+    } else {
+      line1 = '조건을 차례로 식으로 바꿔보자.'
+      line2 = '같은 미지수가 나오면 문제 안에서 의미가 같은지 한 번 더 확인해 봐.'
+    }
+  } else if (focusIndex === 4) {
+    if (mentionsDigits) {
+      line1 = '자릿수 조건은 10x+a에 그대로 넣고, 방정식 한 줄로 묶어보자.'
+      line2 = '서로 다른 조건에서 나온 식을 등호로 연결하면 돼.'
+    } else if (mentionsConsecutive) {
+      line1 = '연속 수 조건으로 나온 식들을 하나의 방정식으로 정리해보자.'
+      line2 = '정리하면 미지수 하나만 남도록 만들면 다음 단계로 가기 좋아.'
+    } else if (mentionsMultipleRelation) {
+      line1 = '몇 배로 잡은 관계식과 나머지 조건을 한 방정식으로 묶어보자.'
+      line2 = '미지수 하나만 남도록 정리했는지 확인하면 돼.'
+    } else {
+      line1 = '세운 식들을 하나의 방정식으로 묶어보자.'
+      line2 = '등호 양변을 정리해서 풀기 좋은 꼴로 만들면 돼.'
+    }
+  } else if (focusIndex === 5) {
+    line1 = '방정식은 양변에 같은 연산을 해서 차근차근 풀어보자.'
+    line2 = '중간에 분수·괄호가 있으면 한 줄씩 정리하며 맞는지 확인해 봐.'
+  } else if (focusIndex === 6) {
+    line1 = '계산 끝나면 문제에서 묻는 값이 맞는지 마지막에 꼭 확인해보자.'
+    line2 = '구한 수를 조건에 다시 넣어보면 실수를 바로 찾을 수 있어.'
+  }
+
+  const out = `${prefix}${line1} ${line2} ${scoreTail}`
+  return out.slice(0, AI_FEEDBACK_STORAGE_MAX_CHARS).trim()
+}
+
+/**
+ * Apps Script doPost `action: generate_ai_feedback` — 동일 맥락을 시트 ai 열에 저장.
+ * 브라우저→GAS 직결 시 CORS로 응답을 못 읽을 수 있음 → 로컬은 `VITE_API_PROXY=/api/gas` 권장.
+ * 실패 시 JSONP(doGet ai_feedback + v3 payload)로 폴백.
+ */
+export async function postGenerateAiFeedback(aiPayload) {
+  const postUrl = resolveAiFeedbackPostUrl()
+  console.log('[AI] generate_ai_feedback POST route:', postUrl)
+  if (!postUrl) {
+    return { ok: false, reason: 'missing_api_url' }
+  }
+  try {
+    const res = await fetch(postUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action: 'generate_ai_feedback', data: aiPayload }),
+    })
+    console.log('[AI] generate_ai_feedback POST success:', res.ok, 'status:', res.status)
+    const rawText = await res.text()
+    console.log('[AI] generate_ai_feedback POST response body:', rawText)
+    let data = null
+    try {
+      data = JSON.parse(rawText)
+    } catch {
+      data = null
+    }
+    const fb = data && String(data.feedback ?? '').trim()
+    const isSuccessResponse =
+      data &&
+      (String(data.result || '').toLowerCase() === 'success' ||
+        data.ok === true ||
+        Boolean(fb))
+    if (res.ok && isSuccessResponse) {
+      return {
+        ok: true,
+        feedback: buildShortCoachingFeedback(String(data.feedback ?? ''), aiPayload),
+      }
+    }
+  } catch (err) {
+    console.warn('[Sheets] postGenerateAiFeedback POST', err)
+  }
+  console.log('[AI] fallback JSONP used')
+  const fallbackRes = await fetchAiFeedbackJsonpV3(aiPayload)
+  if (fallbackRes?.ok) {
+    return {
+      ...fallbackRes,
+      feedback: buildShortCoachingFeedback(String(fallbackRes.feedback ?? ''), aiPayload),
+    }
+  }
+  return fallbackRes
+}
+
+/**
+ * 닉네임 + 클래스 코드 기준으로 기존 진단/학습 진행 기록을 조회합니다.
+ * Apps Script는 `nickname`, `classCode` 쿼리를 받아 해당 학습자 행만 반환하도록 맞추면 됩니다.
+ * (클라이언트에서도 동일 키로 한 번 더 필터링합니다.)
+ */
+/**
+ * 닉네임으로 시트에서 학습자 행을 조회한 뒤, 클래스 코드가 유일하면 반환합니다.
+ * 동일 닉네임이 서로 다른 classCode로 여러 번 기록된 경우 ambiguous입니다.
+ */
+export function analyzeNicknameClassBinding(data, nickname) {
+  const nick = (nickname || '').toString().trim()
+  if (!nick) return { classCode: null, ambiguous: false, recordCount: 0 }
+
+  let records = flattenRecords(data).map((record, idx) => ({
+    ...record,
+    __status: readRecordStatus(record),
+    __timestamp: toTimestampMs(record, idx),
+  }))
+  records = records.filter((r) => recordMatchesLearner(r, nick, '', { classOptional: true }))
+
+  const classSet = new Set()
+  for (const r of records) {
+    classSet.add(normalizeClassCode(readClassCodeFromRecord(r)))
+  }
+  const unique = [...classSet]
+  if (unique.length > 1) {
+    return { classCode: null, ambiguous: true, recordCount: records.length }
+  }
+  if (unique.length === 1) {
+    return { classCode: unique[0], ambiguous: false, recordCount: records.length }
+  }
+  return { classCode: null, ambiguous: false, recordCount: 0 }
+}
+
+/**
+ * 닉네임만으로 GET 조회 (classCode 쿼리 없음).
+ * Apps Script doGet: { found, resolvedClassCode?, multipleClassCodes }
+ */
+export async function fetchStudentRecordsByNickname(nickname) {
   const url = API_URL
   const trimmedNickname = (nickname || '').toString().trim()
+  if (!url || !trimmedNickname) {
+    return { ok: false, reason: !url ? 'missing_api_url' : 'missing_nickname', data: {} }
+  }
+
+  try {
+    const q = new URLSearchParams()
+    q.set('nickname', trimmedNickname)
+    const reqUrl = `${url}?${q.toString()}`
+    const controller = new AbortController()
+    const timeoutId = window.setTimeout(() => controller.abort(), 8000)
+    const res = await fetch(reqUrl, { method: 'GET', signal: controller.signal })
+    window.clearTimeout(timeoutId)
+    if (!res.ok) {
+      return { ok: false, reason: `http_${res.status}`, data: {} }
+    }
+    const rawText = await res.text()
+    const data = parseJsonLoose(rawText)
+    if (data && typeof data === 'object' && Object.keys(data).length) {
+      return { ok: true, data }
+    }
+  } catch (error) {
+    console.warn('[Sheets] fetchStudentRecordsByNickname failed', error?.message || error)
+  }
+  return { ok: false, reason: 'fetch_failed', data: {} }
+}
+
+export async function resolveClassCodeFromNicknameLookup(nickname) {
+  const res = await fetchStudentRecordsByNickname(nickname)
+  if (!res.ok) {
+    return {
+      classCode: null,
+      ambiguous: false,
+      recordCount: 0,
+      ok: false,
+      reason: res.reason,
+    }
+  }
+  const data = res.data
+  if (data && typeof data === 'object' && Object.prototype.hasOwnProperty.call(data, 'found')) {
+    const found = Boolean(data.found)
+    const multiple = Boolean(data.multipleClassCodes)
+    const rawResolved = data.resolvedClassCode
+    const resolved =
+      rawResolved != null && String(rawResolved).trim() !== ''
+        ? normalizeClassCode(String(rawResolved))
+        : null
+    if (multiple) {
+      return { classCode: null, ambiguous: true, recordCount: 0, ok: true, source: 'doGet' }
+    }
+    if (!found) {
+      return { classCode: null, ambiguous: false, recordCount: 0, ok: true, source: 'doGet' }
+    }
+    if (resolved) {
+      return { classCode: resolved, ambiguous: false, recordCount: 1, ok: true, source: 'doGet' }
+    }
+    return { classCode: null, ambiguous: false, recordCount: 0, ok: true, source: 'doGet' }
+  }
+  const binding = analyzeNicknameClassBinding(data, nickname)
+  return { ...binding, ok: true, source: 'flatten' }
+}
+
+export async function fetchStudentLearningProgress(nickname, classCode) {
+  const url = API_URL
+  const trimmedNickname = (nickname || '').toString().trim()
+  const trimmedClass = normalizeClassCode(classCode)
   console.log('[student-progress] fetchStudentLearningProgress entered', {
     nickname,
     trimmedNickname,
+    classCode: trimmedClass,
     hasApiUrl: Boolean(url),
   })
   if (!url || !trimmedNickname) {
@@ -423,7 +901,10 @@ export async function fetchStudentLearningProgress(nickname) {
   }
 
   try {
-    const reqUrl = `${url}?nickname=${encodeURIComponent(trimmedNickname)}`
+    const q = new URLSearchParams()
+    q.set('nickname', trimmedNickname)
+    q.set('classCode', trimmedClass)
+    const reqUrl = `${url}?${q.toString()}`
     console.log('[student-progress] GET request url', reqUrl)
     const controller = new AbortController()
     const timeoutId = window.setTimeout(() => controller.abort(), 8000)
@@ -444,7 +925,7 @@ export async function fetchStudentLearningProgress(nickname) {
       console.warn('[student-progress] parsed data is empty after loose parse')
     }
 
-    return parseProgressFromData(data)
+    return parseProgressFromData(data, { nickname: trimmedNickname, classCode: trimmedClass })
   } catch (error) {
     console.error('[Sheets] fetchStudentLearningProgress:error', {
       message: error?.message || 'unknown_error',
@@ -452,5 +933,648 @@ export async function fetchStudentLearningProgress(nickname) {
       stack: error?.stack || '',
     })
     return getDefaultProgress()
+  }
+}
+
+/**
+ * 관리자 대시보드: GET …?action=class_roster&classCode=…
+ * 응답: `{ result: 'success', students: [ { nickname, level, diag_score, hasDiagnosticResult, … } ] }`
+ * (구버전 `{ ok, roster }` 도 일부 지원)
+ */
+function mapLegacyRosterToStudentRow(entry) {
+  const nick = String(entry?.nickname ?? entry?.닉네임 ?? '').trim()
+  const level = String(entry?.diagnosticTier ?? entry?.level ?? '').trim()
+  const lastStatus = String(entry?.lastStatus ?? entry?.status ?? '').trim()
+  return {
+    nickname: nick,
+    level,
+    diag_score: Number.isFinite(Number(entry?.diag_score)) ? Math.round(Number(entry.diag_score)) : 0,
+    hasDiagnosticResult: Boolean(
+      entry?.hasDiagnosticResult ?? (level !== '' || Number(entry?.diag_score) > 0),
+    ),
+    latestProblem: String(entry?.latestProblem ?? entry?.problem ?? '').trim(),
+    latestType: String(entry?.latestType ?? entry?.type ?? '').trim(),
+    latestTotal: Number.isFinite(Number(entry?.latestTotal ?? entry?.total))
+      ? Number(entry.latestTotal ?? entry.total)
+      : 0,
+    latestStatus: lastStatus || '—',
+    lastActivity: String(entry?.lastActivity ?? entry?.timestamp ?? '').trim(),
+  }
+}
+
+export async function fetchClassRoster(classCode) {
+  const url = API_URL
+  const code = normalizeClassCode(classCode)
+  if (!url) {
+    return { ok: false, reason: 'missing_api_url', rows: [] }
+  }
+  try {
+    const q = new URLSearchParams()
+    q.set('action', 'class_roster')
+    q.set('classCode', code)
+    const reqUrl = `${url}?${q.toString()}`
+    console.log('[admin roster] request url:', reqUrl)
+    const controller = new AbortController()
+    const timeoutId = window.setTimeout(() => controller.abort(), 8000)
+    const res = await fetch(reqUrl, { method: 'GET', signal: controller.signal })
+    window.clearTimeout(timeoutId)
+    if (!res.ok) throw new Error(`목록 조회 실패 (${res.status})`)
+    const rawText = await res.text()
+    const data = parseJsonLoose(rawText)
+    console.log('[admin roster] response:', data)
+
+    if (String(data?.result || '').toLowerCase() === 'error') {
+      return {
+        ok: false,
+        reason: 'roster_api',
+        message: String(data?.message || 'class_roster 조회 실패'),
+        rows: [],
+      }
+    }
+
+    if (String(data?.result || '').toLowerCase() === 'success') {
+      return { ok: true, rows: Array.isArray(data.students) ? data.students : [] }
+    }
+
+    if (Array.isArray(data?.students)) {
+      return { ok: true, rows: data.students }
+    }
+
+    const roster = data?.roster ?? data?.data?.roster
+    if (Array.isArray(roster) && roster.length > 0 && typeof roster[0] === 'object' && !Array.isArray(roster[0])) {
+      if (data?.ok === false) {
+        return { ok: false, reason: 'roster_api', message: String(data?.error || ''), rows: [] }
+      }
+      return { ok: true, rows: roster.map(mapLegacyRosterToStudentRow) }
+    }
+    if (Array.isArray(roster) && roster.length === 0 && data?.ok !== false) {
+      return { ok: true, rows: [] }
+    }
+
+    const direct = data?.rows || data?.data?.students || null
+    if (Array.isArray(direct) && direct.length && typeof direct[0] === 'object' && !Array.isArray(direct[0])) {
+      return { ok: true, rows: direct }
+    }
+    const flat = flattenRecords(data)
+    const asObjects = flat.filter((r) => readNicknameFromRecord(r))
+    return { ok: true, rows: asObjects }
+  } catch (error) {
+    console.error('[Sheets] fetchClassRoster:error', error)
+    return {
+      ok: false,
+      reason: 'network_or_parse',
+      message: error?.message || 'unknown_error',
+      rows: [],
+    }
+  }
+}
+
+/**
+ * 관리자: GET ?action=class_problem_stats&classCode= — 문제×유형 수련 통계
+ * @returns {{ ok: boolean, stats: object[], records?: object[], problems?: string[], reason?: string, message?: string }}
+ */
+export async function fetchClassProblemLearningStats(classCode) {
+  const url = API_URL
+  const code = normalizeClassCode(classCode)
+  if (!url) {
+    return { ok: false, reason: 'missing_api_url', message: '', stats: [], records: [], problems: [] }
+  }
+  if (!code) {
+    return { ok: false, reason: 'missing_class_code', message: '', stats: [], records: [], problems: [] }
+  }
+  try {
+    const q = new URLSearchParams()
+    q.set('action', 'class_problem_stats')
+    q.set('classCode', code)
+    const reqUrl = `${url}?${q.toString()}`
+    console.log('[admin problem stats] request url:', reqUrl)
+    const controller = new AbortController()
+    const timeoutId = window.setTimeout(() => controller.abort(), 15000)
+    const res = await fetch(reqUrl, { method: 'GET', signal: controller.signal })
+    window.clearTimeout(timeoutId)
+    if (!res.ok) {
+      return { ok: false, reason: `http_${res.status}`, message: '', stats: [], records: [], problems: [] }
+    }
+    const rawText = await res.text()
+    const data = parseJsonLoose(rawText)
+    console.log('[admin problem stats] response:', data)
+    if (String(data?.result || '').toLowerCase() === 'error') {
+      return {
+        ok: false,
+        reason: 'problem_stats_api',
+        message: String(data?.message || 'class_problem_stats 조회 실패'),
+        stats: [],
+        records: [],
+        problems: [],
+      }
+    }
+    if (String(data?.result || '').toLowerCase() === 'success' && Array.isArray(data.stats)) {
+      const records = Array.isArray(data.records) ? data.records : []
+      const problems = Array.isArray(data.problems) ? data.problems : []
+      console.log('[problem stats] raw records:', records)
+      console.log('[problem stats] grouped stats:', data.stats)
+      return { ok: true, stats: data.stats, records, problems }
+    }
+    return { ok: false, reason: 'unexpected_shape', message: '', stats: [], records: [], problems: [] }
+  } catch (error) {
+    console.error('[Sheets] fetchClassProblemLearningStats:error', error)
+    return {
+      ok: false,
+      reason: 'network_or_parse',
+      message: error?.message || 'unknown_error',
+      stats: [],
+      records: [],
+      problems: [],
+    }
+  }
+}
+
+export function sheetStatusLabelForAdmin(record) {
+  const ns = record.__status ?? readRecordStatus(record)
+  if (ns === 'training_completed') return '수련완료'
+  if (ns === 'diagnostic_completed') return '진단완료'
+  if (ns === 'in_progress') return '진행중'
+  const raw = String(record?.status ?? '').trim()
+  return raw || '—'
+}
+
+export function formatAdminHistoryTimestamp(record) {
+  const v = record.timestamp ?? record.completionDate ?? record.completedAt ?? record.diag_time
+  if (v instanceof Date && !Number.isNaN(v.getTime())) {
+    return v.toLocaleString('ko-KR', { timeZone: 'Asia/Seoul' })
+  }
+  const s = String(v ?? '').trim()
+  if (!s) return '—'
+  const ms = Date.parse(s)
+  if (Number.isFinite(ms)) {
+    return new Date(ms).toLocaleString('ko-KR', { timeZone: 'Asia/Seoul' })
+  }
+  return s
+}
+
+/**
+ * 관리자 화면 전용: 구글 시트와 동일한 한국 시간 표기
+ * `yyyy. M. d 오전/오후 h:mm:ss` (예: 2026. 4. 28 오후 12:26:30)
+ */
+export function formatAdminSeoulSheetTimestamp(value) {
+  if (value === undefined || value === null || value === '') return '—'
+  if (value instanceof Date && !Number.isNaN(value.getTime())) {
+    return formatAdminSeoulSheetTimestampFromDate_(value)
+  }
+  const s = String(value).trim()
+  if (!s) return '—'
+  const ms = Date.parse(s)
+  if (Number.isFinite(ms)) {
+    return formatAdminSeoulSheetTimestampFromDate_(new Date(ms))
+  }
+  return s
+}
+
+/** 목록용: 한 레코드에서 표시할 대표 시각 (H timestamp 우선) */
+export function formatAdminSeoulSheetTimestampFromRecord(record) {
+  const v = record?.timestamp ?? record?.completionDate ?? record?.completedAt ?? record?.diag_time
+  return formatAdminSeoulSheetTimestamp(v)
+}
+
+function formatAdminSeoulSheetTimestampFromDate_(d) {
+  const parts = new Intl.DateTimeFormat('ko-KR', {
+    timeZone: 'Asia/Seoul',
+    year: 'numeric',
+    month: 'numeric',
+    day: 'numeric',
+    hour: 'numeric',
+    minute: '2-digit',
+    second: '2-digit',
+    hour12: true,
+  }).formatToParts(d)
+
+  const byType = Object.create(null)
+  for (const p of parts) {
+    if (p.type !== 'literal') byType[p.type] = p.value
+  }
+  const year = byType.year ?? ''
+  const month = String(byType.month ?? '').replace(/\.$/, '').trim()
+  const day = String(byType.day ?? '').replace(/\.$/, '').trim()
+  const hour = byType.hour ?? ''
+  const minute = byType.minute ?? ''
+  const second = byType.second ?? ''
+  const dayPeriod = byType.dayPeriod ?? ''
+
+  if (!year || !month || !day) {
+    return d.toLocaleString('ko-KR', { timeZone: 'Asia/Seoul' })
+  }
+
+  return `${year}. ${month}. ${day} ${dayPeriod} ${hour}:${minute}:${second}`.replace(/\s+/g, ' ').trim()
+}
+
+/** 관리자 API/시트: step1~6 은 0(실패)이 유효 — hasOwnProperty + 0 보존 */
+function adminNormalizeStepFromRaw(raw, i) {
+  const keys = ['step1', 'step2', 'step3', 'step4', 'step5', 'step6']
+  const k = keys[i]
+  if (raw && typeof raw === 'object' && Object.prototype.hasOwnProperty.call(raw, k)) {
+    const d = raw[k]
+    if (d !== undefined && d !== null && d !== '') return d
+    if (d === 0) return 0
+  }
+  const scores = Array.isArray(raw?.scores) ? raw.scores : []
+  if (scores.length > i) {
+    const v = scores[i]
+    if (v !== undefined && v !== null && v !== '') return v
+    if (v === 0) return 0
+  }
+  return ''
+}
+
+function adminNormalizeHintFromRaw(raw) {
+  if (raw?.hint !== undefined && raw?.hint !== null && raw?.hint !== '') return raw.hint
+  if (raw?.hint === 0) return 0
+  if (raw?.totalHint !== undefined && raw?.totalHint !== null && raw?.totalHint !== '') return raw.totalHint
+  if (raw?.totalHint === 0) return 0
+  return ''
+}
+
+function normalizeAdminHistoryRecordShape(raw) {
+  const scores = Array.isArray(raw?.scores) ? raw.scores : []
+  const hintRaw = adminNormalizeHintFromRaw(raw)
+  const sr = Number(raw?.sheetRow)
+  return {
+    ...raw,
+    nickname: String(raw?.nickname ?? '').trim(),
+    classCode: normalizeClassCode(raw?.classCode ?? ''),
+    problem: String(raw?.problem ?? '').trim(),
+    type: String(raw?.type ?? '').trim(),
+    level: String(raw?.level ?? '').trim(),
+    total: raw?.total,
+    hint: hintRaw,
+    status: String(raw?.status ?? '').trim(),
+    ai: String(raw?.ai ?? '').trim(),
+    step1: adminNormalizeStepFromRaw(raw, 0),
+    step2: adminNormalizeStepFromRaw(raw, 1),
+    step3: adminNormalizeStepFromRaw(raw, 2),
+    step4: adminNormalizeStepFromRaw(raw, 3),
+    step5: adminNormalizeStepFromRaw(raw, 4),
+    step6: adminNormalizeStepFromRaw(raw, 5),
+    scores,
+    sheetRow: Number.isFinite(sr) ? sr : undefined,
+  }
+}
+
+/** Apps Script `adminHistoryRowTimeMs_` 와 동일한 기준 (클라이언트 재정렬용) */
+function adminHistoryRowTimeMsForSort(rec) {
+  const t = rec?.timestamp
+  if (t instanceof Date && !Number.isNaN(t.getTime())) return t.getTime()
+  const e = rec?.diag_time
+  if (e instanceof Date && !Number.isNaN(e.getTime())) return e.getTime()
+  const s = String(t ?? '').trim()
+  if (s) {
+    const p = Date.parse(s)
+    if (Number.isFinite(p)) return p
+  }
+  const s2 = String(e ?? '').trim()
+  if (s2) {
+    const p2 = Date.parse(s2)
+    if (Number.isFinite(p2)) return p2
+  }
+  return 0
+}
+
+function sortAdminHistoryRecordsInPlace(records) {
+  records.sort((a, b) => {
+    const ta = adminHistoryRowTimeMsForSort(a)
+    const tb = adminHistoryRowTimeMsForSort(b)
+    if (ta !== tb) return ta - tb
+    return (Number(a.sheetRow) || 0) - (Number(b.sheetRow) || 0)
+  })
+}
+
+function finalizeAdminHistoryRecords(rawList) {
+  const records = rawList.map((r) => normalizeAdminHistoryRecordShape(r))
+  sortAdminHistoryRecordsInPlace(records)
+  console.log('[admin history] records count:', records.length)
+  console.log('[admin history] raw records:', rawList)
+  return records
+}
+
+/**
+ * 관리자: GET ?action=student_history&nickname=&classCode= (전체 행 + step1~6),
+ * 미배포 시 GET ?nickname=&classCode= `{ data }` 로 폴백합니다.
+ */
+export async function fetchAdminStudentLearningHistory(nickname, classCode) {
+  const url = API_URL
+  const nick = (nickname || '').toString().trim()
+  const cc = normalizeClassCode(classCode)
+  if (!url || !nick || !cc) {
+    return {
+      ok: false,
+      reason: !url ? 'missing_api_url' : 'missing_params',
+      message: '',
+      records: [],
+    }
+  }
+  try {
+    const q = new URLSearchParams()
+    q.set('action', 'student_history')
+    q.set('nickname', nick)
+    q.set('classCode', cc)
+    const reqUrl = `${url}?${q.toString()}`
+    console.log('[admin history] request url:', reqUrl)
+    const controller = new AbortController()
+    const timeoutId = window.setTimeout(() => controller.abort(), 20000)
+    const res = await fetch(reqUrl, { method: 'GET', signal: controller.signal })
+    window.clearTimeout(timeoutId)
+    if (!res.ok) {
+      return { ok: false, reason: `http_${res.status}`, message: '', records: [] }
+    }
+    const rawText = await res.text()
+    const data = parseJsonLoose(rawText)
+    console.log('[admin history] response:', data)
+
+    if (String(data?.result || '').toLowerCase() === 'error') {
+      return {
+        ok: false,
+        reason: 'student_history_api',
+        message: String(data?.message || 'student_history 조회 실패'),
+        records: [],
+      }
+    }
+
+    // `student_history`는 `records`에 전체 행을 담습니다. `data`만 있는 레거시 응답보다 항상 우선합니다.
+    if (Array.isArray(data?.records)) {
+      return { ok: true, records: finalizeAdminHistoryRecords(data.records) }
+    }
+    if (Array.isArray(data?.data)) {
+      return { ok: true, records: finalizeAdminHistoryRecords(data.data) }
+    }
+
+    const q2 = new URLSearchParams()
+    q2.set('nickname', nick)
+    q2.set('classCode', cc)
+    const fallbackUrl = `${url}?${q2.toString()}`
+    console.log('[admin history] fallback request url:', fallbackUrl)
+    const controller2 = new AbortController()
+    const timeoutId2 = window.setTimeout(() => controller2.abort(), 20000)
+    const res2 = await fetch(fallbackUrl, { method: 'GET', signal: controller2.signal })
+    window.clearTimeout(timeoutId2)
+    if (!res2.ok) {
+      return { ok: false, reason: `http_${res2.status}`, message: '', records: [] }
+    }
+    const raw2 = await res2.text()
+    const data2 = parseJsonLoose(raw2)
+    console.log('[admin history] fallback response:', data2)
+    let rawRecords = []
+    if (Array.isArray(data2?.data)) {
+      rawRecords = data2.data
+    } else {
+      rawRecords = flattenRecords(data2).filter((r) =>
+        recordMatchesLearner(r, nick, cc, { classOptional: false }),
+      )
+    }
+    const records = finalizeAdminHistoryRecords(rawRecords)
+    return { ok: true, records }
+  } catch (error) {
+    console.error('[Sheets] fetchAdminStudentLearningHistory:error', error)
+    return {
+      ok: false,
+      reason: 'network_or_parse',
+      message: error?.message || 'unknown_error',
+      records: [],
+    }
+  }
+}
+
+/**
+ * 클래스 코드 확인 화면용 메타데이터.
+ * Apps Script 예: GET …?action=class_info&classCode=…
+ * 응답 예: `{ className, courseTitle, teacherName }` 또는 `{ data: { … } }`
+ */
+export async function fetchClassInfo(classCode) {
+  const url = API_URL
+  const code = normalizeClassCode(classCode)
+  const fallback = (reason = '') => ({
+    ok: reason === 'missing_api_url' ? false : true,
+    reason: reason || undefined,
+    classCode: code,
+    eyebrow: '나의 클래스',
+    title: `반 코드 ${code}`,
+    subtitle: '',
+    footnote: '이 클래스에 참여합니다.',
+  })
+
+  if (!url) return fallback('missing_api_url')
+
+  try {
+    const q = new URLSearchParams()
+    q.set('action', 'class_info')
+    q.set('classCode', code)
+    const reqUrl = `${url}?${q.toString()}`
+    const controller = new AbortController()
+    const timeoutId = window.setTimeout(() => controller.abort(), 8000)
+    const res = await fetch(reqUrl, { method: 'GET', signal: controller.signal })
+    window.clearTimeout(timeoutId)
+    if (!res.ok) return fallback()
+    const rawText = await res.text()
+    const data = parseJsonLoose(rawText)
+    const inner = data?.class ?? data?.data ?? data
+    const title =
+      (inner?.courseTitle ?? inner?.title ?? inner?.displayName ?? inner?.name ?? '').toString().trim() ||
+      `반 코드 ${code}`
+    const teacherName = (inner?.teacherName ?? inner?.teacher ?? inner?.선생님 ?? '').toString().trim()
+    const subtitle =
+      (inner?.subtitle ?? inner?.description ?? '').toString().trim() ||
+      (teacherName ? `${teacherName} 선생님의 방정식 수련반` : '')
+    return {
+      ok: true,
+      classCode: code,
+      eyebrow: (inner?.eyebrow ?? inner?.label ?? '나의 클래스').toString().trim() || '나의 클래스',
+      title,
+      subtitle,
+      footnote: '이 클래스에 참여합니다.',
+    }
+  } catch (error) {
+    console.warn('[Sheets] fetchClassInfo:fallback', error)
+    return fallback()
+  }
+}
+
+/**
+ * 관리자: GET …?mode=classes&teacherEmail=… → **classes** 시트만 조회 (Sheet1과 무관).
+ * 응답: `{ result: 'success', classes: [ { teacherEmail, classCode, className, createdAt } ] }`
+ */
+export async function fetchTeacherClasses(teacherEmail) {
+  const url = API_URL
+  const email = normalizeTeacherEmailForCompare(teacherEmail)
+  if (!url || !email) {
+    return { ok: false, reason: !url ? 'missing_api_url' : 'missing_teacherEmail', classes: [], rows: [] }
+  }
+  try {
+    const q = new URLSearchParams()
+    q.set('mode', 'classes')
+    q.set('teacherEmail', email)
+    const reqUrl = `${url}?${q.toString()}`
+    console.log('[admin] classes request url:', reqUrl)
+    const controller = new AbortController()
+    const timeoutId = window.setTimeout(() => controller.abort(), 8000)
+    const res = await fetch(reqUrl, { method: 'GET', signal: controller.signal })
+    window.clearTimeout(timeoutId)
+    if (!res.ok) {
+      return { ok: false, reason: `http_${res.status}`, classes: [], rows: [] }
+    }
+    const rawText = await res.text()
+    const data = parseJsonLoose(rawText)
+    console.log('[admin] classes response:', data)
+    const list = data?.classes ?? data?.data?.classes ?? []
+    const rows = Array.isArray(data?.rows) ? data.rows : []
+    const resultStr = String(data?.result ?? '').toLowerCase()
+    if (resultStr === 'error') {
+      return {
+        ok: false,
+        reason: 'classes_api',
+        classes: [],
+        rows,
+        message: String(data?.message || 'classes 조회 실패'),
+      }
+    }
+    if (!Array.isArray(list)) {
+      return {
+        ok: false,
+        reason: 'invalid_response',
+        classes: [],
+        rows,
+        message: 'classes 배열이 없습니다. 웹앱 doGet에 mode=classes를 배포했는지 확인해 주세요.',
+      }
+    }
+    const apiOk = resultStr === 'success' || data?.ok === true
+    const normalizeClassDisplayName = (rawName, rawCode) => {
+      const fallbackCode = normalizeClassCode(rawCode || '')
+      const text = String(rawName ?? '').trim()
+      if (!text) return ''
+      const ms = Date.parse(text)
+      // 클래스명이 날짜 문자열로 깨진 경우(예: Thu Jan 01 2026 ...) 표시 보정
+      if (Number.isFinite(ms) && /gmt|한국 표준시|kst|utc/i.test(text)) {
+        const d = new Date(ms)
+        const month = d.getMonth() + 1
+        const day = d.getDate()
+        if (Number.isFinite(month) && Number.isFinite(day)) {
+          return `${month}-${day}`
+        }
+        return fallbackCode
+      }
+      return text
+    }
+
+    const classes = list
+      .map((row) => {
+        const rawCode = String(row.classCode ?? row.클래스코드 ?? '').trim()
+        if (!rawCode) return null
+        const displayName = normalizeClassDisplayName(
+          row.displayName ?? row.className ?? row.title ?? row.name ?? '',
+          rawCode,
+        )
+        return {
+          displayName,
+          classCode: normalizeClassCode(rawCode),
+          teacherEmail: String(row.teacherEmail ?? row.email ?? '').trim(),
+          createdAt: String(row.createdAt ?? '').trim(),
+        }
+      })
+      .filter(Boolean)
+    return { ok: apiOk || classes.length > 0, classes, rows }
+  } catch (error) {
+    console.error('[Sheets] fetchTeacherClasses:error', error)
+    return { ok: false, reason: 'network_error', classes: [], rows: [], message: error?.message || '' }
+  }
+}
+
+/**
+ * 관리자: POST action=create_class
+ * payload: { teacherEmail, classCode, className }
+ * 응답: { result: 'success' | 'exists' | 'error', class?: { ... }, message?: string }
+ */
+export async function createTeacherClass(teacherEmail, classCode, className) {
+  const url = resolveAiFeedbackPostUrl()
+  const email = normalizeTeacherEmailForCompare(teacherEmail)
+  const code = normalizeClassCode(classCode)
+  const name = String(className || '').trim()
+
+  if (!url) return { ok: false, reason: 'missing_api_url', message: '' }
+  if (!email || !code || !name) {
+    return { ok: false, reason: 'missing_params', message: 'teacherEmail, classCode, className이 필요합니다.' }
+  }
+
+  try {
+    console.log('[admin] create_class POST route:', url)
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        action: 'create_class',
+        teacherEmail: email,
+        classCode: code,
+        className: name,
+      }),
+    })
+    const raw = await res.text()
+    const data = parseJsonLoose(raw)
+    const result = String(data?.result || '').toLowerCase()
+    if (res.ok && (result === 'success' || result === 'exists')) {
+      return {
+        ok: true,
+        duplicated: result === 'exists',
+        class: data?.class || null,
+        message: String(data?.message || ''),
+      }
+    }
+    return {
+      ok: false,
+      reason: result || `http_${res.status}`,
+      message: String(data?.message || ''),
+    }
+  } catch (error) {
+    return {
+      ok: false,
+      reason: 'network_error',
+      message:
+        error?.message ||
+        '네트워크 오류(개발환경에서는 VITE_API_PROXY=/api/gas 프록시 설정 확인 필요)',
+    }
+  }
+}
+
+/**
+ * 관리자: POST action=delete_class
+ * payload: { teacherEmail, classCode }
+ * 응답: { result: 'success' | 'not_found' | 'error' }
+ */
+export async function deleteTeacherClass(teacherEmail, classCode) {
+  const url = resolveAiFeedbackPostUrl()
+  const email = normalizeTeacherEmailForCompare(teacherEmail)
+  const code = normalizeClassCode(classCode)
+  if (!url) return { ok: false, reason: 'missing_api_url', message: '' }
+  if (!email || !code) {
+    return { ok: false, reason: 'missing_params', message: 'teacherEmail, classCode가 필요합니다.' }
+  }
+  try {
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        action: 'delete_class',
+        teacherEmail: email,
+        classCode: code,
+      }),
+    })
+    const raw = await res.text()
+    const data = parseJsonLoose(raw)
+    const result = String(data?.result || '').toLowerCase()
+    if (res.ok && (result === 'success' || result === 'not_found')) {
+      return {
+        ok: true,
+        deleted: result === 'success',
+        message: String(data?.message || ''),
+      }
+    }
+    return { ok: false, reason: result || `http_${res.status}`, message: String(data?.message || '') }
+  } catch (error) {
+    return { ok: false, reason: 'network_error', message: error?.message || '' }
   }
 }

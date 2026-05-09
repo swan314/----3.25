@@ -1,0 +1,33 @@
+﻿code,problem,term,name,description,rarity,image
+1-A,1-A,등호(=),같다,양쪽이 같음을 나타내는 기호,1,card/equal.png
+1-B,1-B,소수,나눌 수 없는 수,1과 자신만으로 나누어지는 수,2,card/prime.png
+1-C,1-C,최대공약수,공약수의 왕,공통 약수 중 가장 큰 수,2,card/gcd.png
+1-D,1-D,절댓값(｜｜),거리의 수,0 까지의 거리,1,card/absolute.png
+1-E,1-E,다항식,여러 항을 가진 식,여러 항이 더해진 식,1,card/polynomial.png
+2-A,2-A,부등호(≥),이상,크거나 같다,1,card/greater_equal.png
+2-B,2-B,합성수,나누어지는 수,1과 자신 이외의 약수를 갖는 수,2,card/composite.png
+2-C,2-C,최소공배수,공배수의 핵심,공통 배수 중 가장 작은 수,2,card/lcm.png
+2-D,2-D,이항,항의 이동,항을 반대쪽으로 옮기는 것,3,card/transposition.png
+2-E,2-E,동류항,같은 종류 항,문자와 차수가 같은 항,3,card/like_terms.png
+3-A,3-A,부등호(≤),이하,작거나 같다,1,card/less_equal.png
+3-B,3-B,소인수,소수인 인수,소수이면서 어떤 수의 약수인 수,3,card/prime_factor.png
+3-C,3-C,서로소,깨끗한 관계,공약수가 1뿐인 두 수,1,card/coprime.png
+3-D,3-D,약분,분수 줄이기,분수를 더 간단하게 만드는 것,2,card/reduction.png
+3-E,3-E,등식,균형의 식,양쪽의 값이 같은 식,2,card/equation_balance.png
+4-A,4-A,부등호(＞),초과,크다,1,card/greater_than.png
+4-B,4-B,소인수분해,소수로 나누기,수를 소수의 곱으로 나타내는 것,3,card/prime_factorization.png
+4-C,4-C,양수(+),플러스 수,0보다 큰 수,1,card/positive.png
+4-D,4-D,통분,분모 통일,분모를 같게 만드는 것,2,card/common_denominator.png
+4-E,4-E,방정식,미지의 식,미지수가 포함된 등식,2,card/equation.png
+5-A,5-A,부등호(＜),미만,작다,1,card/less_than.png
+5-B,5-B,약수,나누는 수,어떤 수를 나누는 수,2,card/divisor.png
+5-C,5-C,음수(-),마이너스 수,0보다 작은 수,1,card/negative.png
+5-D,5-D,역수,뒤집힌 수,곱하면 1이 되는 두 수의 관계,2,card/reciprocal.png
+5-E,5-E,해,미지수의 열쇠,방정식을 만족하는 값,2,card/solution.png
+6-A,6-A,거듭제곱,반복 곱셈,같은 수를 여러 번 곱하는 것,1,card/power.png
+6-B,6-B,배수,곱해진 수,어떤 수를 곱해서 만든 수,2,card/multiple_number.png
+6-C,6-C,수직선,숫자의 길,수를 한 줄로 나타낸 것,1,card/number_line.png
+6-D,6-D,대입,문자 대신 숫자,문자 대신 숫자를 넣는 것,1,card/substitution.png
+6-E,6-E,미지수,숨겨진 수,아직 값이 정해지지 않은 수,2,card/unknown.png
+6-F,6-F,항등식,긍정의 식,항상 참이 되는 등식,2,card/identity_equation.png
+6-G,6-G,분배법칙,나누어 주기,곱셈을 덧셈에 나누어 적용,3,card/distributive.png

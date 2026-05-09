@@ -5,11 +5,13 @@ import shaoImg from './assets/shao.png'
 import samjangImg from './assets/samjang.png'
 import okdongjaImg from './assets/okdongja.png'
 import 'mathlive'
+import { buildStudentHashQuery, normalizeClassCode, readStudentQueryParams } from './classCode.js'
 import {
   createTrainingLaunchFromDiagnostic,
   getCharacterNameForTier,
   MM_TRAINING_LAUNCH_KEY,
 } from './levelConfig.js'
+import { clearAllStudentLocalSession } from './studentPersist.js'
 
 const app = document.querySelector('#app')
 const API_URL = (import.meta.env.VITE_API_URL || '').toString().trim()
@@ -30,16 +32,51 @@ function resolveStageScoresFromSession(payload) {
   return byProblem[problemId] || null
 }
 
-function toSheetRowPayload(payload = {}) {
-  const diagnosticScore = Number.isFinite(Number(payload?.diag_score))
-    ? Number(payload.diag_score)
-    : Number.isFinite(Number(payload?.totalScore))
-      ? Number(payload.totalScore)
-      : 0
+function firstFiniteNumber(values) {
+  for (const v of values) {
+    const n = Number(v)
+    if (Number.isFinite(n)) return n
+  }
+  return NaN
+}
 
-  // 진단평가 저장 전용 매핑:
-  // A(nickname), B(level), C(diag_score), D(diag_time), P(status), Q(ai)
-  // E~P(수련 데이터)는 반드시 빈값으로 전송
+/** 진단 최종 화면·등급(최상/상/중/하) 산정과 동일: 문제별 stages 득점만 합산 */
+function getDiagnosticProblemSums(problemsList, assessment) {
+  const byProb = assessment?.scoresByProblem || {}
+  return problemsList.map((p) => {
+    const sc = byProb[p.id] || []
+    return p.stages.reduce((acc, _, i) => acc + (Number(sc[i]) || 0), 0)
+  })
+}
+
+function getDiagnosticTotalPoints(problemsList, assessment) {
+  return getDiagnosticProblemSums(problemsList, assessment).reduce((a, b) => a + b, 0)
+}
+
+function toSheetRowPayload(payload = {}) {
+  const raw = payload != null && typeof payload === 'object' ? payload : {}
+  // 0점은 유효 — diag_score 키가 있으면 무조건 숫자로 채택 (|| / falsy 보정 금지)
+  let diagnosticScore = NaN
+  if (Object.prototype.hasOwnProperty.call(raw, 'diag_score')) {
+    const n = Number(raw.diag_score)
+    if (Number.isFinite(n)) diagnosticScore = n
+  }
+  if (!Number.isFinite(diagnosticScore)) {
+    diagnosticScore = firstFiniteNumber([
+      raw.diagnosticScore,
+      raw.finalScore,
+      raw.finalTotalScore,
+      raw.totalScore,
+      raw.score,
+      raw.total,
+    ])
+  }
+  const diagnosticScoreSafe = Number.isFinite(diagnosticScore) ? diagnosticScore : 0
+
+  // 시트 열 순서 (요청 기준): A nickname, B classCode, C level, D diag_score, E diag_time, F~ …
+  const classCode = normalizeClassCode(
+    payload?.classCode ?? payload?.클래스코드 ?? readStudentQueryParams().classCode
+  )
   return {
     nickname: (
       payload?.nickname ??
@@ -47,14 +84,15 @@ function toSheetRowPayload(payload = {}) {
       getStudentNicknameFromHash() ??
       '익명'
     ).toString(),
+    classCode,
     level: (payload?.level ?? '').toString(),
-    diag_score: diagnosticScore,
+    diag_score: diagnosticScoreSafe,
     diag_time: (payload?.diag_time ?? new Date().toISOString()).toString(),
     item: '',
     phase: '',
     scores: [],
-    score: '',
-    totalScore: '',
+    score: diagnosticScoreSafe,
+    totalScore: diagnosticScoreSafe,
     totalHint: '',
     ai: '',
     status: 'diagnostic_completed',
@@ -62,31 +100,25 @@ function toSheetRowPayload(payload = {}) {
 }
 
 function getStudentNicknameFromHash() {
-  const hashRaw = (location.hash || '').replace(/^#/, '')
-  const queryIndex = hashRaw.indexOf('?')
-  if (queryIndex === -1) return ''
-  const query = hashRaw.slice(queryIndex + 1)
-  const params = new URLSearchParams(query)
-  return (params.get('nickname') || '').trim()
+  return readStudentQueryParams().nickname
+}
+
+function getStudentClassCodeFromHash() {
+  return readStudentQueryParams().classCode
 }
 
 async function saveDataToSheets(payload) {
   const normalizedPayload = toSheetRowPayload(payload)
-  if (normalizedPayload?.status === 'diagnostic_completed') {
-    console.log('[Sheets] normalized diagnostic payload', {
-      nickname: normalizedPayload.nickname,
-      level: normalizedPayload.level,
-      diag_score: normalizedPayload.diag_score,
-      diag_time: normalizedPayload.diag_time,
-      status: normalizedPayload.status,
-    })
-    console.log('[Sheets] diagnostic payload json', JSON.stringify(normalizedPayload))
-  }
   if (!API_URL) {
     console.warn('[Sheets] saveDataToSheets: no API URL')
     return { ok: false, reason: 'missing_api_url' }
   }
   try {
+    if (normalizedPayload?.status === 'diagnostic_completed') {
+      const diagnosticScore = payload?.diag_score
+      console.log('[diagnostic] raw score:', diagnosticScore)
+      console.log('[diagnostic] saved score:', normalizedPayload.diag_score)
+    }
     await fetch(API_URL, {
       method: 'POST',
       mode: 'no-cors',   // ⭐ 핵심 추가
@@ -166,8 +198,10 @@ function renderWelcome() {
   `
 
   app.querySelector('#mm-start')?.addEventListener('click', () => {
-    const nick = getStudentNicknameFromHash()
-    const q = nick ? `?nickname=${encodeURIComponent(nick)}` : ''
+    const q = buildStudentHashQuery({
+      nickname: getStudentNicknameFromHash(),
+      classCode: getStudentClassCodeFromHash(),
+    })
     location.hash = `#level-check${q}`
   })
 
@@ -504,6 +538,7 @@ function renderLevelCheckPlaceholder(problemIdx = 0) {
     const safeScores = Array.isArray(stageResultScores) ? normalizeScoresArray(stageResultScores) : new Array(6).fill(0)
     const merged = {
       nickname: getStudentNicknameFromHash() || '익명',
+      classCode: getStudentClassCodeFromHash(),
       item: extra.item ?? problem.id ?? '',
       phase: extra.phase ?? getCurrentPhaseLabel(),
       scores: extra.scores ?? safeScores,
@@ -520,43 +555,55 @@ function renderLevelCheckPlaceholder(problemIdx = 0) {
     return merged
   }
 
-  async function reportFinalCompletion(level, totalScore) {
+  /**
+   * @param {{ tierLevel: string, tableTotalPoints: number }} ctx
+   *   tierLevel: 등급 판정에 쓰인 키(최상|상|중|하). tableTotalPoints: 결과표의 `total`(problemSums 합).
+   */
+  async function reportFinalCompletion(ctx) {
     if (window.__mmAssessment.reportedFinalCompletion) return
     window.__mmAssessment.reportedFinalCompletion = true
+    const tierLevel = (ctx?.tierLevel || '하').toString().trim() || '하'
     const diagnosticLevelByTier = {
       최상: '손오공(최상)',
       상: '샤오(상)',
       중: '삼장(중)',
       하: '옥동자(하)',
     }
-    const diagnosticLevel = diagnosticLevelByTier[level] || '옥동자(하)'
-    const computedTotalScore = problems.reduce((sum, p) => {
-      const perProblemScores = window.__mmAssessment?.scoresByProblem?.[p.id] || []
-      return sum + p.stages.reduce((acc, _, idx) => acc + Number(perProblemScores[idx] || 0), 0)
-    }, 0)
-    const finalTotalScore = Number.isFinite(Number(computedTotalScore))
-      ? Number(computedTotalScore)
-      : Number.isFinite(Number(totalScore))
-        ? Number(totalScore)
-        : 0
+    const diagnosticLevel = diagnosticLevelByTier[tierLevel] || '옥동자(하)'
+    const mm = window.__mmAssessment || {}
+    const recomputedTotal = getDiagnosticTotalPoints(problems, mm)
+    const sessionTotal =
+      typeof getCurrentTotalScore === 'function' ? Number(getCurrentTotalScore()) : NaN
+    const tableN = Number(ctx?.tableTotalPoints)
+    // 결과표 총점·세션 합계·문항별 재계산 합 — 동일 진단 세션 내 실제 합계만 사용 (등급 보정 없음)
+    const primaryNums = [tableN, recomputedTotal, sessionTotal]
+      .map((v) => Number(v))
+      .filter((n) => Number.isFinite(n) && n >= 0)
+    const rawTotal = primaryNums.length ? Math.max(...primaryNums) : 0
+    const diagnosticScore = Number.isFinite(rawTotal) ? rawTotal : 0
+
     const diagnosticPayload = {
       nickname: getStudentNicknameFromHash() || '익명',
+      classCode: getStudentClassCodeFromHash(),
       level: diagnosticLevel,
-      diag_score: finalTotalScore,
+      diag_score: Number.isFinite(diagnosticScore) ? diagnosticScore : 0,
       diag_time: new Date().toISOString(),
       status: 'diagnostic_completed',
     }
     try {
       const cacheNickname = (diagnosticPayload.nickname || '').trim()
+      const cacheClass = (diagnosticPayload.classCode || '').toString().trim()
       if (cacheNickname) {
+        const cacheKey = `mm_diag_completed_${encodeURIComponent(cacheNickname)}_${encodeURIComponent(cacheClass)}`
         localStorage.setItem(
-          `mm_diag_completed_${cacheNickname}`,
+          cacheKey,
           JSON.stringify({
             nickname: cacheNickname,
-            tier: level,
+            classCode: cacheClass,
+            tier: tierLevel,
             level: diagnosticLevel,
             status: 'diagnostic_completed',
-            diag_score: finalTotalScore,
+            diag_score: diagnosticScore,
             diag_time: diagnosticPayload.diag_time,
           })
         )
@@ -564,15 +611,13 @@ function renderLevelCheckPlaceholder(problemIdx = 0) {
     } catch (cacheError) {
       console.warn('[Diagnostic] local cache save failed', cacheError)
     }
-    console.log('[Diagnostic] saveDataToSheets payload', diagnosticPayload)
-    console.log('[Diagnostic] diag_score check', diagnosticPayload.diag_score)
-    console.log('[Diagnostic] payload json', JSON.stringify(diagnosticPayload))
+    console.log('[diagnostic] level:', tierLevel)
     const sendResult = await saveDataToSheets(diagnosticPayload)
 
     return {
       ok: Boolean(sendResult?.ok),
       diagnosticLevel,
-      totalScore,
+      totalScore: diagnosticPayload.diag_score,
       sendResult,
     }
   }
@@ -1734,10 +1779,7 @@ function renderLevelCheckPlaceholder(problemIdx = 0) {
 
   async function renderFinalAchievementTable() {
     const qCount = 4
-    const problemSums = problems.map((p) => {
-      const sc = window.__mmAssessment.scoresByProblem[p.id] || []
-      return p.stages.reduce((acc, _, i) => acc + (sc[i] || 0), 0)
-    })
+    const problemSums = getDiagnosticProblemSums(problems, window.__mmAssessment)
     const problemMax = problems.map((p) => p.stages.reduce((a, s) => a + s.points, 0))
     const rowSums = Array.from({ length: qCount }, (_, qi) =>
       problems.reduce((sum, p) => sum + ((window.__mmAssessment.scoresByProblem[p.id] || [])[qi] || 0), 0)
@@ -1767,45 +1809,45 @@ function renderLevelCheckPlaceholder(problemIdx = 0) {
 
     const levelProfiles = {
       최상: {
-        headline: '문장(文章)의 마스터: 손오공',
+        headline: '손오공(최상)',
         summary:
-          "'용기(勇氣)', '필승(必勝)' 등 복잡한 한자 마법을 자유자재로 조합하듯, 복잡한 문장을 완벽한 방정식으로 변환하는 능력자입니다.",
+          '수많은 수식을 한데 엮어 복잡한 식을 단번에 정리하는, 수학마법의 정점에 선 연산자입니다. 일차방정식은 당신 손끝에서 강력한 ‘방정 주문’이 됩니다.',
         message:
-          '천자탄이 완성되었다! 너의 방정식은 어떤 난제도 단번에 타격할 수 있는 강력한 마법이야.',
+          '핵심 식이 완성됐다! 이제 어떤 난제도 수식의 흐름으로 꿰뚫을 수 있어. 수학마법의 힘이 느껴지지?',
         badge: '⭐',
       },
       상: {
-        headline: '지략의 명사수: 샤오',
+        headline: '샤오(상)',
         summary:
-          '차분하고 영리하게 상황을 분석하여 마법을 부리는 샤오처럼, 문제 속 단서를 정확히 찾아내어 논리적인 식을 설계합니다.',
+          '냉정하게 조건을 읽고, 단서를 모아 식을 설계하는 수학마법사입니다. 수많은 단서 속에서도 본질적인 수식을 짚어냅니다.',
         message:
-          '한자 마법의 핵심을 꿰뚫었구나! 복잡한 조건들도 너의 논리 앞에서는 명확한 수식으로 정리돼.',
+          '수식의 뼈대를 잡았군! 복잡한 말이 수식으로 정리되는 그 감각, 수학마법의 중급 주문이 이미 몸에 배었어.',
         badge: '🎯',
       },
       중: {
-        headline: '성실한 탐험가: 삼장',
+        headline: '삼장(중)',
         summary:
-          '마법 능력은 충분하지만 때때로 신중함이 더 필요한 단계입니다. 포기하지 않고 끝까지 문제를 탐구하며 실력을 키워갑니다.',
-        message: '마법의 기운이 느껴져! 조금만 더 집중해서 방정식을 만들어 보자.',
+          '수학마법의 기운은 충분해요. 풀이를 끝까지 끌고 가며, 실수를 줄이는 연습이 다음 단계의 열쇠입니다.',
+        message: '수식이 반응하고 있어! 조금만 더 집중해 방정식을 완성해 보자. 수학마법의 문지방을 넘고 있어.',
         badge: '🧭',
       },
       하: {
-        headline: '마법 수련생: 옥동자',
+        headline: '옥동자(하)',
         summary:
-          "이제 막 마법 천자패를 손에 넣은 단계입니다. '나올 출(出)', '들 입(入)' 같은 기초 한자(미지수 설정)부터 익히며 모험을 시작합니다.",
+          '이제 막 수학마법의 첫 페이지를 펼친 단계예요. 미지수를 정하고, 식을 세우는 기초 주문부터 익혀 가며 모험을 시작합니다.',
         message:
-          '마법 천자패가 반응하고 있어! 미지수 x라는 마법의 기초를 다지면 곧 강력한 주문을 쓸 수 있을 거야.',
+          '기초 주문이 막 반응하기 시작했어! x를 잡는 연습이 쌓이면 곧 훨씬 강한 수학마법을 쓰게 될 거야.',
         badge: '🌱',
       },
     }
 
     const activeProfile = levelProfiles[level]
-    await reportFinalCompletion(level, total)
+    await reportFinalCompletion({ tierLevel: level, tableTotalPoints: total })
     const levelAvatarImg = {
-      최상: { src: sonGokuImg, alt: '최상 캐릭터 손오공' },
-      상: { src: shaoImg, alt: '상 캐릭터 샤오' },
-      중: { src: samjangImg, alt: '중 캐릭터 삼장' },
-      하: { src: okdongjaImg, alt: '하 캐릭터 옥동자' },
+      최상: { src: sonGokuImg, alt: '최상 티어 캐릭터: 손오공(최상)' },
+      상: { src: shaoImg, alt: '상 티어 캐릭터: 샤오(상)' },
+      중: { src: samjangImg, alt: '중 티어 캐릭터: 삼장(중)' },
+      하: { src: okdongjaImg, alt: '하 티어 캐릭터: 옥동자(하)' },
     }
     const av = levelAvatarImg[level]
     const avatarInner = `<img src="${av.src}" alt="${escapeHtml(av.alt)}" class="mm-final-avatar-img" width="240" height="240" />`
@@ -1876,7 +1918,11 @@ function renderLevelCheckPlaceholder(problemIdx = 0) {
 
     app.querySelector('#mm-start-training')?.addEventListener('click', () => {
       const launch = {
-        ...createTrainingLaunchFromDiagnostic(level, getStudentNicknameFromHash()),
+        ...createTrainingLaunchFromDiagnostic(
+          level,
+          getStudentNicknameFromHash(),
+          getStudentClassCodeFromHash()
+        ),
         resultHeadline: activeProfile.headline,
         diagnosticTotalScore: total,
         diagnosticMaxScore: totalMax,
@@ -1890,6 +1936,7 @@ function renderLevelCheckPlaceholder(problemIdx = 0) {
       window.location.href = new URL('index.html', window.location.origin + base).href
     })
     app.querySelector('#mm-exit-diagnostic')?.addEventListener('click', () => {
+      clearAllStudentLocalSession()
       const base = import.meta.env.BASE_URL || '/'
       window.location.href = new URL('index.html', window.location.origin + base).href
     })

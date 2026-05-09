@@ -363,6 +363,16 @@ function stripTrailingUnits(raw) {
 
 const NUMERIC_EQ_TOLERANCE = 1e-6
 
+function hasMultipleAnswerTokens(raw) {
+  const text = String(raw ?? '').trim()
+  if (!text) return false
+  const tokens = text
+    .split(/[,\n]/)
+    .map((v) => String(v || '').trim())
+    .filter(Boolean)
+  return tokens.length >= 2
+}
+
 function gcdBigInt(a, b) {
   let x = a < 0n ? -a : a
   let y = b < 0n ? -b : b
@@ -451,6 +461,10 @@ function extractComparableNumber(raw) {
 }
 
 function strictNumericEquivalence(studentRaw, expectedRaw) {
+  // 다중 정답(예: "28, 29")은 숫자값 단일 동치 비교로 맞추지 않는다.
+  // 이 케이스는 전체 문자열/쌍 비교 로직에서만 통과해야 한다.
+  if (hasMultipleAnswerTokens(studentRaw) || hasMultipleAnswerTokens(expectedRaw)) return false
+
   if (requiresFullSymbolicMatch(expectedRaw)) return false
   if (requiresFullSymbolicMatch(studentRaw)) return false
 

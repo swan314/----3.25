@@ -8,3 +8,22 @@ body {
   margin: 0;
   min-height: 100vh;
 }
+
+@keyframes math-card-shine {
+  0% {
+    box-shadow: 0 0 10px rgba(250, 204, 21, 0.35), 0 0 22px rgba(251, 191, 36, 0.25);
+    transform: scale(1);
+  }
+  50% {
+    box-shadow: 0 0 22px rgba(250, 204, 21, 0.8), 0 0 44px rgba(251, 191, 36, 0.55);
+    transform: scale(1.02);
+  }
+  100% {
+    box-shadow: 0 0 10px rgba(250, 204, 21, 0.35), 0 0 22px rgba(251, 191, 36, 0.25);
+    transform: scale(1);
+  }
+}
+
+.math-card-glow {
+  animation: math-card-shine 1.8s ease-in-out infinite;
+}
