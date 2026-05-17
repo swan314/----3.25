@@ -11,19 +11,24 @@ import {
   formatDiagnosticCharacterLabel,
   resolveCanonicalDiagnosticTier,
 } from './levelConfig'
-import {
-  computeResumeTargetAfterSheetCompletion,
-  isTrainingCompletedSheetRecord,
-} from './training/trainingResumeFromSheet'
 import { DEFAULT_CLASS_CODE, normalizeClassCode } from './classCode'
 import { loadTrainingProblemCodesFromCsv } from './utils/dataLoader'
 import { clearAllStudentLocalSession, readStoredLearner, writeStoredLearner } from './studentPersist'
 import {
   buildProblemAnalysisAiPayload,
   createProblemAnalysisDraft,
-  generateProblemAnalysisFeedback,
+  fetchProblemAnalysisWithFallback,
 } from './admin/problemAnalysisAi'
+import {
+  computeAdminStudentSummary,
+  enrichAdminRosterWithSummaries,
+} from './admin/adminStudentSummary'
+import {
+  ADMIN_STUDENT_SUMMARY_COLUMNS,
+  formatAdminStudentSummaryCells,
+} from './admin/adminStudentSummaryDisplay'
 import { AdminProblemStatsTable } from './components/AdminProblemStatsTable'
+import { AdminTeacherClassCard } from './components/AdminTeacherClassCard'
 import {
   AdminDiagnosticHistoryDetail,
   AdminTrainingHistoryDetail,
@@ -33,16 +38,25 @@ import {
 import {
   createTeacherClass,
   deleteTeacherClass,
+  updateTeacherClass,
   fetchAdminStudentLearningHistory,
   fetchClassInfo,
   fetchClassProblemLearningStats,
   fetchClassRoster,
   fetchStudentLearningProgress,
   fetchTeacherClasses,
-  formatAdminSeoulSheetTimestampFromRecord,
+  formatAdminSeoulSheetTimestamp,
+  formatAdminHistoryNumericCell,
+  formatAdminHistoryTableTimestamp,
   resolveClassCodeFromNicknameLookup,
   sheetStatusLabelForAdmin,
 } from './sheets'
+import {
+  countCompletedProblemsForMathCards,
+  applySheetProblemOutcomeLists,
+  mergeTrainingProblemProgressMaps,
+} from './training/trainingProblemProgress'
+import { readStoredTrainingProblemProgress, writeStoredTrainingProblemProgress } from './studentPersist'
 
 function decodeJwtPayload(token) {
   try {
@@ -132,12 +146,17 @@ export default function App() {
   const [createClassError, setCreateClassError] = useState('')
   const [createClassNotice, setCreateClassNotice] = useState('')
   const [isCreateClassBusy, setIsCreateClassBusy] = useState(false)
+  const [openClassMenuKey, setOpenClassMenuKey] = useState(/** @type {string | null} */ (null))
+  const [renameClassTarget, setRenameClassTarget] = useState(/** @type {object | null} */ (null))
+  const [renameClassName, setRenameClassName] = useState('')
+  const [renameClassError, setRenameClassError] = useState('')
+  const [isRenameClassBusy, setIsRenameClassBusy] = useState(false)
   const [adminRosterNicknameQuery, setAdminRosterNicknameQuery] = useState('')
   const [adminRosterLevelFilter, setAdminRosterLevelFilter] = useState(
     /** @type {'all' | 'top' | 'high' | 'mid' | 'low'} */ ('all'),
   )
   const [adminRosterStatusFilter, setAdminRosterStatusFilter] = useState(
-    /** @type {'all' | 'diagnostic_done' | 'training_done'} */ ('all'),
+    /** @type {'all' | 'diagnostic_done'} */ ('all'),
   )
   /** 문제별 학습 분석: 문제×유형 통계 행, 원시 집계용 records, 문제 드롭다운 후보 */
   const [adminProblemStatsRows, setAdminProblemStatsRows] = useState([])
@@ -145,10 +164,17 @@ export default function App() {
   const [adminProblemStatsProblemKeys, setAdminProblemStatsProblemKeys] = useState([])
   const [adminCsvTrainingProblems, setAdminCsvTrainingProblems] = useState([])
   const [adminProblemAnalysisSelect, setAdminProblemAnalysisSelect] = useState('')
+  /** 문제별 분석 카드: Web App 성공 시 api, 실패·미구현 시 stats */
+  const [adminProblemAnalysisUi, setAdminProblemAnalysisUi] = useState({
+    loading: false,
+    source: /** @type {null | 'api' | 'stats'} */ (null),
+    sections: /** @type {null | ReturnType<typeof createProblemAnalysisDraft>} */ (null),
+  })
   const [adminProblemStatsError, setAdminProblemStatsError] = useState('')
   const [adminPage, setAdminPage] = useState(/** @type {'dashboard' | 'students'} */ ('dashboard'))
   const [adminStudentDetail, setAdminStudentDetail] = useState(null)
   const [adminHistoryRecords, setAdminHistoryRecords] = useState([])
+  const [adminHistoryCompletedProblems, setAdminHistoryCompletedProblems] = useState([])
   const [adminHistoryLoading, setAdminHistoryLoading] = useState(false)
   const [adminHistoryError, setAdminHistoryError] = useState('')
   const [adminHistoryView, setAdminHistoryView] = useState(/** @type {'list' | 'detail'} */ ('list'))
@@ -199,39 +225,24 @@ export default function App() {
       }
 
       const resumeBase = buildResumeTrainingPlan(progress, nick, cc)
+      const progressMap = applySheetProblemOutcomeLists(
+        mergeTrainingProblemProgressMaps(
+          readStoredTrainingProblemProgress(nick, cc),
+          progress.trainingProblemProgressByCode || {},
+        ),
+        progress.completedProblems,
+        progress.failedProblems,
+      )
+      writeStoredTrainingProblemProgress(nick, cc, progressMap)
+      const trainingProgressMapByProblem = progress.trainingProgressMapByProblem || {}
 
-      if (!progress.hasTrainingCompletion || !progress.latestTrainingRecord) {
-        setTrainingPlan({
-          ...resumeBase,
-          classCode: cc,
-          resumeType: '본문제',
-          resumeProblemNumber: 1,
-        })
-        setJoinedClassSnapshot(null)
-        setStudentFlowStep('nickname')
-        setActiveView('diagnostic-intro')
-        return
-      }
-
-      const latestTrainingRecord = progress.latestTrainingRecord
-      if (!isTrainingCompletedSheetRecord(latestTrainingRecord)) {
-        setTrainingPlan({
-          ...resumeBase,
-          classCode: cc,
-          resumeType: '본문제',
-          resumeProblemNumber: 1,
-        })
-        setJoinedClassSnapshot(null)
-        setStudentFlowStep('nickname')
-        setActiveView('diagnostic-intro')
-        return
-      }
-
-      const resumeFields = computeResumeTargetAfterSheetCompletion(latestTrainingRecord)
       setTrainingPlan({
         ...resumeBase,
         classCode: cc,
-        ...resumeFields,
+        trainingProblemProgressByCode: progressMap,
+        trainingProgressMapByProblem,
+        completedProblems: progress.completedProblems ?? [],
+        failedProblems: progress.failedProblems ?? [],
       })
       setJoinedClassSnapshot(null)
       setStudentFlowStep('nickname')
@@ -601,12 +612,51 @@ export default function App() {
     }
   }
 
+  const openRenameClassModal = (row) => {
+    const code = normalizeClassCode(row?.classCode)
+    const current = String(row?.displayName || row?.className || code).trim()
+    setRenameClassTarget(row)
+    setRenameClassName(current)
+    setRenameClassError('')
+    setOpenClassMenuKey(null)
+  }
+
+  const handleRenameClassSubmit = async (e) => {
+    e.preventDefault()
+    if (!teacherProfile?.email || !renameClassTarget) return
+    const code = normalizeClassCode(renameClassTarget.classCode)
+    const nextName = renameClassName.trim()
+    if (!code || !nextName) {
+      setRenameClassError('새 클래스 이름을 입력해 주세요.')
+      return
+    }
+    setIsRenameClassBusy(true)
+    setRenameClassError('')
+    try {
+      const res = await updateTeacherClass(teacherProfile.email, code, nextName)
+      if (!res.ok) {
+        setRenameClassError(res.message || '클래스 이름 변경에 실패했습니다.')
+        return
+      }
+      await reloadTeacherClasses()
+      setRenameClassTarget(null)
+      setRenameClassName('')
+    } catch (err) {
+      setRenameClassError(err?.message || '클래스 이름 변경 중 오류가 발생했습니다.')
+    } finally {
+      setIsRenameClassBusy(false)
+    }
+  }
+
   const handleDeleteClass = async (row) => {
     if (!teacherProfile?.email) return
     const code = normalizeClassCode(row?.classCode)
     const name = String(row?.displayName || row?.className || code).trim()
     if (!code) return
-    const confirmed = window.confirm(`클래스 "${name} (${code})"를 삭제할까요?`)
+    setOpenClassMenuKey(null)
+    const confirmed = window.confirm(
+      '정말 삭제하시겠습니까?\n\n삭제 후 학생 기록은 복구되지 않습니다.',
+    )
     if (!confirmed) return
     const res = await deleteTeacherClass(teacherProfile.email, code)
     if (!res.ok) {
@@ -664,9 +714,9 @@ export default function App() {
       const levelStr = String(row.level ?? row.diagnosticTier ?? '').trim()
       if (!adminLevelMatchesFilter(levelStr, adminRosterLevelFilter)) return false
 
-      const st = String(row.latestStatus ?? row.status ?? row.lastStatus ?? '').trim()
-      if (adminRosterStatusFilter === 'diagnostic_done' && st !== '진단완료') return false
-      if (adminRosterStatusFilter === 'training_done' && st !== '수련완료') return false
+      if (adminRosterStatusFilter === 'diagnostic_done' && row.hasDiagnosticResult !== true) {
+        return false
+      }
 
       return true
     })
@@ -712,14 +762,28 @@ export default function App() {
   )
 
   useEffect(() => {
-    if (!adminProblemAnalysisAiPayload.problem) return
-    void generateProblemAnalysisFeedback(adminProblemAnalysisAiPayload)
+    if (!adminProblemAnalysisAiPayload.problem) {
+      setAdminProblemAnalysisUi({ loading: false, source: null, sections: null })
+      return
+    }
+    let cancelled = false
+    setAdminProblemAnalysisUi((prev) => ({ ...prev, loading: true }))
+    ;(async () => {
+      const out = await fetchProblemAnalysisWithFallback(adminProblemAnalysisAiPayload)
+      if (cancelled) return
+      setAdminProblemAnalysisUi({
+        loading: false,
+        source: out.source,
+        sections: out.sections,
+      })
+    })()
+    return () => {
+      cancelled = true
+    }
   }, [adminProblemAnalysisAiPayload])
 
-  const adminProblemAnalysisDraft = useMemo(
-    () => createProblemAnalysisDraft(adminProblemAnalysisAiPayload),
-    [adminProblemAnalysisAiPayload],
-  )
+  const adminProblemAnalysisDraft =
+    adminProblemAnalysisUi.sections ?? createProblemAnalysisDraft(adminProblemAnalysisAiPayload)
 
   const adminHasProblemTrainingRecords =
     adminProblemStatsRecords.length > 0 || adminProblemStatsRows.length > 0
@@ -733,6 +797,7 @@ export default function App() {
   const handleAdminLoadRoster = async () => {
     setAdminStudentDetail(null)
     setAdminHistoryRecords([])
+    setAdminHistoryCompletedProblems([])
     setAdminHistoryError('')
     setAdminHistoryLoading(false)
     setAdminHistoryView('list')
@@ -760,7 +825,9 @@ export default function App() {
         )
         return
       }
-      setAdminRoster(Array.isArray(res.rows) ? res.rows : [])
+      const rosterRows = Array.isArray(res.rows) ? res.rows : []
+      const enrichedRows = await enrichAdminRosterWithSummaries(rosterRows, code)
+      setAdminRoster(enrichedRows)
 
       const [statsRes, csvProblems] = await Promise.all([
         fetchClassProblemLearningStats(code),
@@ -807,6 +874,7 @@ export default function App() {
   const closeAdminStudentDetail = useCallback(() => {
     setAdminStudentDetail(null)
     setAdminHistoryRecords([])
+    setAdminHistoryCompletedProblems([])
     setAdminHistoryError('')
     setAdminHistoryLoading(false)
     setAdminHistoryView('list')
@@ -829,6 +897,7 @@ export default function App() {
       if (!row) return
       setAdminStudentDetail(row)
       setAdminHistoryRecords([])
+      setAdminHistoryCompletedProblems([])
       setAdminHistoryError('')
       setAdminHistoryLoading(true)
       setAdminHistoryView('list')
@@ -845,9 +914,13 @@ export default function App() {
           if (!res.ok) {
             setAdminHistoryError(res.message || '학습 기록을 불러오지 못했습니다.')
             setAdminHistoryRecords([])
+            setAdminHistoryCompletedProblems([])
             return
           }
           setAdminHistoryRecords(Array.isArray(res.records) ? res.records : [])
+          setAdminHistoryCompletedProblems(
+            Array.isArray(res.completedProblems) ? res.completedProblems : [],
+          )
         })
         .finally(() => setAdminHistoryLoading(false))
     },
@@ -872,62 +945,86 @@ export default function App() {
     if (adminHistoryView !== 'detail' || !adminSelectedHistoryRecord) return
     const r = adminSelectedHistoryRecord
     console.log('[admin detail] selected record:', r)
-    console.log(
-      '[admin detail] steps:',
-      r.step1,
-      r.step2,
-      r.step3,
-      r.step4,
-      r.step5,
-      r.step6,
-    )
+    console.log('[admin detail] steps:', {
+      step1: r.step1,
+      step2: r.step2,
+      step3: r.step3,
+      step4: r.step4,
+      step5_1: r.step5_1,
+      step5_2: r.step5_2,
+      step5_3: r.step5_3,
+      step6: r.step6,
+    })
   }, [adminHistoryView, adminSelectedHistoryRecord])
 
+  const adminStudentSummary = useMemo(() => {
+    if (!adminStudentDetail) return null
+    return computeAdminStudentSummary({
+      records: adminHistoryRecords,
+      rosterRow: adminStudentDetail,
+      completedProblems: adminHistoryCompletedProblems,
+    })
+  }, [adminStudentDetail, adminHistoryRecords, adminHistoryCompletedProblems])
+
   return (
-    <div className="relative min-h-screen overflow-hidden bg-gradient-to-br from-yellow-100 via-blue-100 to-yellow-50 text-slate-900">
+    <div className="relative flex min-h-screen flex-col overflow-hidden bg-gradient-to-br from-yellow-100 via-blue-100 to-yellow-50 text-slate-900">
       <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(circle_at_20%_20%,rgba(37,99,235,0.12),transparent_45%),radial-gradient(circle_at_80%_0%,rgba(250,204,21,0.2),transparent_45%),radial-gradient(circle_at_40%_80%,rgba(37,99,235,0.1),transparent_42%)]" />
       <div className="pointer-events-none absolute inset-0 opacity-25 [background-image:radial-gradient(circle_at_center,rgba(59,130,246,0.22)_1.5px,transparent_1.5px),radial-gradient(circle_at_center,rgba(234,179,8,0.2)_1.5px,transparent_1.5px)] [background-position:0_0,28px_28px] [background-size:56px_56px]" />
 
-      <main className="relative mx-auto flex w-full max-w-6xl flex-col px-4 py-8 sm:px-6 lg:px-10 lg:py-12">
+      <main
+        className={`relative mx-auto flex w-full max-w-6xl flex-col px-4 sm:px-6 lg:px-10 ${
+          activeView === 'diagnostic-intro'
+            ? 'flex min-h-[calc(100dvh-2rem)] flex-1 flex-col justify-center py-10 sm:py-12'
+            : 'py-8 lg:py-12'
+        }`}
+      >
         {activeView === 'training' && (
           <TrainingMode
             nickname={studentNickname.trim() || '익명'}
             classCode={normalizeClassCode(trainingPlan?.classCode ?? studentClassCode)}
             trainingPlan={trainingPlan}
+            onTrainingProgressChange={(map) => {
+              setTrainingPlan((prev) =>
+                prev ? { ...prev, trainingProblemProgressByCode: map } : prev,
+              )
+            }}
             onExit={handleStudentExitFromFlow}
           />
         )}
 
         {activeView === 'diagnostic-intro' && trainingPlan && (
-          <section className="mx-auto w-full max-w-3xl rounded-3xl border border-blue-200/80 bg-white/90 p-6 shadow-2xl shadow-blue-300/20 backdrop-blur-md sm:p-8">
-            <div className="space-y-6 text-center">
+          <section className="mx-auto w-full max-w-3xl rounded-3xl border border-violet-200/80 bg-white/90 p-5 shadow-2xl shadow-violet-200/25 backdrop-blur-md sm:p-7">
+            <div className="space-y-4 text-center">
               {getIntroVariant(trainingPlan) === 'first' ? (
-                <h2 className="text-3xl font-black text-blue-950 sm:text-4xl">🎉 진단 완료!</h2>
+                <div className="space-y-1">
+                  <h2 className="text-2xl font-black text-violet-950 sm:text-3xl">🎉 진단 완료!</h2>
+                  <p className="text-sm font-semibold text-slate-600 sm:text-base">
+                    이제 나에게 맞는 수련을 시작해 볼까요?
+                  </p>
+                </div>
               ) : (
                 <div className="space-y-1">
-                  <p className="text-2xl font-black text-blue-950 sm:text-3xl">다시 돌아왔군요!</p>
-                  <p className="text-base font-semibold text-slate-600 sm:text-lg">수련을 이어가 볼까요?</p>
+                  <p className="text-xl font-black text-violet-950 sm:text-2xl">다시 돌아왔군요!</p>
+                  <p className="text-sm font-semibold text-slate-600 sm:text-base">수련을 이어가 볼까요?</p>
                 </div>
               )}
-              <div>
-                <img
-                  src={
-                    {
-                      최상: sonGokuImg,
-                      상: shaoImg,
-                      중: samjangImg,
-                      하: okdongjaImg,
-                    }[getLevelFromPlan(trainingPlan)] || magicMainIllustration
-                  }
-                  alt={`${getLevelFromPlan(trainingPlan)} 레벨 캐릭터`}
-                  className="mx-auto h-48 w-48 rounded-2xl border border-blue-200 bg-blue-50 object-cover sm:h-56 sm:w-56"
-                />
-              </div>
-              <div className="rounded-2xl border border-blue-100 bg-blue-50/70 p-4 text-left">
-                <p className="text-lg font-black text-blue-900 sm:text-xl">
+              <img
+                src={
+                  {
+                    최상: sonGokuImg,
+                    상: shaoImg,
+                    중: samjangImg,
+                    하: okdongjaImg,
+                  }[getLevelFromPlan(trainingPlan)] || magicMainIllustration
+                }
+                alt={`${getLevelFromPlan(trainingPlan)} 레벨 캐릭터`}
+                className="mx-auto h-40 w-40 rounded-xl border border-blue-200 object-cover sm:h-44 sm:w-44"
+              />
+              <div className="rounded-2xl border border-violet-100 bg-violet-50/70 p-3.5 text-left sm:p-4">
+                <p className="text-base font-black text-violet-900 sm:text-lg">
                   {formatDiagnosticCharacterLabel(getLevelFromPlan(trainingPlan))}
                 </p>
-                <p className="mt-2 text-sm leading-relaxed text-slate-700 sm:text-base">
+                <p className="mt-1.5 text-sm leading-relaxed text-slate-700 sm:text-[0.9375rem]">
                   {{
                     최상: '최고 수준입니다! 어떤 문제도 해결할 수 있습니다.',
                     상: '잘하고 있습니다! 조금만 더 노력하면 최고 단계입니다.',
@@ -938,36 +1035,34 @@ export default function App() {
                 </p>
               </div>
               {getIntroVariant(trainingPlan) === 'return' && (
-                <div className="rounded-2xl border border-slate-200 bg-slate-50/90 px-4 py-3 text-sm text-slate-800 sm:text-base">
-                  <p className="font-bold">
-                    현재까지 완료한 수련 문제: {Number(trainingPlan.trainingCompletedCount ?? 0)}개
-                  </p>
-                  {trainingPlan.latestTrainingRecord?.problem ? (
-                    <p className="mt-1 text-slate-600">
-                      최근 기록 문항: {String(trainingPlan.latestTrainingRecord.problem).trim()}
-                    </p>
-                  ) : null}
-                </div>
+                <p className="inline-flex rounded-full bg-violet-100 px-4 py-2 text-sm font-bold text-violet-900">
+                  MATH-CARD{' '}
+                  {countCompletedProblemsForMathCards(trainingPlan.trainingProblemProgressByCode)}장 / 15
+                </p>
               )}
-              <p className="rounded-2xl border border-amber-300 bg-amber-50 px-4 py-3 text-center text-sm font-bold leading-relaxed text-amber-900 shadow-sm sm:text-base">
-                수련 문제를 해결하면 보상으로 숫자카드를 얻을 수 있습니다.
-                <br />
-                15개의 카드를 모두 모으면 당신은 방정식 마스터가 될 수 있습니다.
-                <br />
-                지금 바로 도전해보세요!
-              </p>
-              <div className="flex flex-col items-center gap-3 sm:flex-row sm:justify-center">
+              <div className="rounded-lg border border-violet-100/90 bg-violet-50/40 px-3 py-2.5 text-left sm:text-center">
+                <p className="text-sm font-medium leading-relaxed text-slate-800">
+                  수련 문제를 해결하면 보상으로 숫자카드를 얻을 수 있어요.
+                </p>
+                <p className="mt-1 text-sm font-medium leading-relaxed text-slate-800/90">
+                  15개의 카드를 모두 모으면 방정식 마스터에 한 걸음 더 가까워져요.
+                </p>
+                <p className="mt-1 text-sm font-medium leading-relaxed text-slate-800/90">
+                  지금 바로 도전해보세요!
+                </p>
+              </div>
+              <div className="flex flex-col items-stretch gap-2.5 pt-1 sm:flex-row sm:justify-center sm:gap-3">
                 <button
                   type="button"
                   onClick={() => setActiveView('training')}
-                  className="rounded-xl bg-gradient-to-r from-yellow-400 to-amber-500 px-6 py-3 text-base font-black text-slate-900 shadow-lg shadow-yellow-500/30 transition hover:brightness-105 active:translate-y-px"
+                  className="step-learning-cta-glow step-learning-cta-btn rounded-xl bg-violet-600 px-6 py-3 text-base font-bold text-white shadow-md shadow-violet-600/35 transition hover:bg-violet-700 active:translate-y-px sm:min-w-[200px]"
                 >
-                  {getIntroVariant(trainingPlan) === 'first' ? '수련 시작하기' : '이어 수련하기'}
+                  {getIntroVariant(trainingPlan) === 'first' ? '수련 시작하기' : '수련하기'}
                 </button>
                 <button
                   type="button"
                   onClick={handleStudentExitFromFlow}
-                  className="rounded-xl border border-slate-300 bg-white px-5 py-2.5 text-sm font-bold text-slate-700 transition hover:bg-slate-50 active:translate-y-px"
+                  className="rounded-xl border border-slate-300 bg-white px-5 py-2.5 text-sm font-bold text-slate-700 shadow-sm transition hover:bg-slate-50 hover:shadow-md active:translate-y-px sm:min-w-[120px]"
                 >
                   나가기
                 </button>
@@ -1249,30 +1344,21 @@ export default function App() {
                     {!teacherClassesLoading && teacherClasses.length > 0 ? (
                       <ul className="mt-4 flex flex-col gap-2">
                         {teacherClasses.map((row, idx) => {
-                          const title =
-                            (row.displayName || '').trim() || normalizeClassCode(row.classCode)
                           const code = normalizeClassCode(row.classCode)
+                          const menuKey = `${code}-${idx}`
                           return (
-                            <li key={`${code}-${idx}`}>
-                              <div className="flex items-center gap-2 rounded-xl border border-blue-200 bg-white px-3 py-2 shadow-sm">
-                                <button
-                                  type="button"
-                                  onClick={() => handleTeacherPickClass(row)}
-                                  className="min-w-0 flex-1 rounded-lg px-1 py-1 text-left text-sm font-bold text-blue-950 transition hover:bg-blue-50/80"
-                                >
-                                  <span className="block text-base">{title}</span>
-                                  <span className="mt-0.5 block font-mono text-xs font-semibold text-slate-600">
-                                    ({code})
-                                  </span>
-                                </button>
-                                <button
-                                  type="button"
-                                  onClick={() => handleDeleteClass(row)}
-                                  className="rounded-lg border border-red-200 bg-red-50 px-3 py-1.5 text-xs font-bold text-red-700 transition hover:bg-red-100"
-                                >
-                                  삭제
-                                </button>
-                              </div>
+                            <li key={menuKey}>
+                              <AdminTeacherClassCard
+                                row={row}
+                                menuOpen={openClassMenuKey === menuKey}
+                                onMenuToggle={() =>
+                                  setOpenClassMenuKey((prev) => (prev === menuKey ? null : menuKey))
+                                }
+                                onMenuClose={() => setOpenClassMenuKey(null)}
+                                onPick={() => handleTeacherPickClass(row)}
+                                onRename={() => openRenameClassModal(row)}
+                                onDelete={() => handleDeleteClass(row)}
+                              />
                             </li>
                           )
                         })}
@@ -1414,20 +1500,21 @@ export default function App() {
                           <div className="mt-5 rounded-2xl border border-violet-200/80 bg-white px-4 py-4 shadow-sm sm:px-5">
                             <h4 className="text-sm font-black text-violet-950">AI 분석</h4>
                             <p className="mt-1 text-xs text-slate-600">
-                              선택한 문제의 통계와 수련 기록을 모아 두었다가, API 연결 후 한 번에 분석 요청에 사용할 수
-                              있습니다.
+                              선택한 문제가 바뀌면 Web App(VITE_API_URL)으로 분석을 요청합니다. Apps Script에서 처리하면 AI
+                              요약이 표시되고, 실패·미연동 시 통계 기반 요약으로 대체됩니다.
                             </p>
-                            <div className="mt-3 flex flex-col gap-2 sm:flex-row sm:items-center sm:gap-3">
-                              <button
-                                type="button"
-                                disabled
-                                className="inline-flex cursor-not-allowed items-center justify-center rounded-lg border border-slate-200 bg-slate-100 px-4 py-2 text-sm font-semibold text-slate-500"
-                              >
-                                AI 분석 생성
-                              </button>
-                              <p className="text-xs text-slate-500">
-                                AI 분석 기능은 API 사용량이 준비되면 활성화됩니다.
-                              </p>
+                            <div className="mt-3 flex flex-wrap items-center gap-2">
+                              {adminProblemAnalysisUi.loading ? (
+                                <p className="text-xs font-semibold text-violet-700">분석 요청 중…</p>
+                              ) : adminProblemAnalysisUi.source === 'api' ? (
+                                <span className="rounded-full bg-emerald-100 px-2.5 py-1 text-xs font-bold text-emerald-800">
+                                  AI 응답
+                                </span>
+                              ) : adminProblemAnalysisUi.source === 'stats' ? (
+                                <span className="rounded-full bg-slate-200/90 px-2.5 py-1 text-xs font-bold text-slate-700">
+                                  통계 요약
+                                </span>
+                              ) : null}
                             </div>
                             <div
                               className="mt-4 rounded-xl border border-violet-100 bg-violet-50/40 px-3 py-3"
@@ -1435,8 +1522,7 @@ export default function App() {
                             >
                               <h5 className="text-sm font-bold text-violet-950">문제별 AI 분석 결과</h5>
                               <p className="mt-2 text-sm leading-relaxed text-slate-700">
-                                선택한 문제의 학습 데이터를 바탕으로 AI가 어려움이 나타난 지점과 지도 방향을 제안할
-                                예정입니다.
+                                선택한 문제의 학습 데이터를 바탕으로 어려움이 나타난 지점과 지도 방향을 제안합니다.
                               </p>
                               <div className="mt-3 grid grid-cols-1 gap-3 lg:grid-cols-2">
                                 <section className="rounded-lg border border-violet-200/80 bg-white px-3 py-3">
@@ -1531,36 +1617,37 @@ export default function App() {
                                   value={adminRosterStatusFilter}
                                   onChange={(e) =>
                                     setAdminRosterStatusFilter(
-                                      /** @type {'all' | 'diagnostic_done' | 'training_done'} */ (e.target.value),
+                                      /** @type {'all' | 'diagnostic_done'} */ (e.target.value),
                                     )
                                   }
                                   className="mt-1 w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm outline-none ring-blue-200 focus:ring-2 sm:w-full"
                                 >
                                   <option value="all">전체</option>
                                   <option value="diagnostic_done">진단완료</option>
-                                  <option value="training_done">수련완료</option>
                                 </select>
                               </div>
                             </div>
                             <div className="max-h-[28rem] overflow-auto rounded-lg border border-slate-200 bg-white">
-                              <table className="w-full min-w-[52rem] border-collapse text-left text-sm">
+                              <table className="w-full min-w-[72rem] border-collapse text-left text-sm">
                                 <thead className="sticky top-0 z-[1] bg-slate-100 text-xs font-bold uppercase text-slate-600">
                                   <tr>
-                                    <th className="border-b border-slate-200 px-2 py-2">닉네임</th>
-                                    <th className="border-b border-slate-200 px-2 py-2">레벨</th>
-                                    <th className="border-b border-slate-200 px-2 py-2">진단점수</th>
-                                    <th className="border-b border-slate-200 px-2 py-2">최근 문제</th>
-                                    <th className="border-b border-slate-200 px-2 py-2">문제 유형</th>
-                                    <th className="border-b border-slate-200 px-2 py-2">최근 점수</th>
-                                    <th className="border-b border-slate-200 px-2 py-2">상태</th>
-                                    <th className="border-b border-slate-200 px-2 py-2 whitespace-nowrap">최근 활동</th>
+                                    {ADMIN_STUDENT_SUMMARY_COLUMNS.map((col) => (
+                                      <th
+                                        key={col.key}
+                                        className={`border-b border-slate-200 px-2 py-2 ${
+                                          col.key === 'lastActivity' ? 'whitespace-nowrap' : ''
+                                        }`}
+                                      >
+                                        {col.label}
+                                      </th>
+                                    ))}
                                   </tr>
                                 </thead>
                                 <tbody>
                                   {filteredAdminRoster.length === 0 ? (
                                     <tr>
                                       <td
-                                        colSpan={8}
+                                        colSpan={ADMIN_STUDENT_SUMMARY_COLUMNS.length}
                                         className="border-b border-slate-100 px-4 py-10 text-center text-sm font-semibold text-slate-500"
                                       >
                                         조건에 맞는 학생이 없습니다.
@@ -1568,21 +1655,8 @@ export default function App() {
                                     </tr>
                                   ) : null}
                                   {filteredAdminRoster.map((row, idx) => {
-                                    const nick =
-                                      row.nickname ?? row.닉네임 ?? row.Nickname ?? row.name ?? row['이름'] ?? '—'
-                                    const level = row.level ?? row.diagnosticTier ?? '—'
-                                    const dsRaw = row.diag_score
-                                    const diag =
-                                      typeof dsRaw === 'number' && Number.isFinite(dsRaw)
-                                        ? dsRaw
-                                        : dsRaw !== '' && dsRaw != null && String(dsRaw).trim() !== '' && Number.isFinite(Number(dsRaw))
-                                          ? Math.round(Number(dsRaw))
-                                          : '—'
-                                    const prob = row.latestProblem ?? row.problem ?? ''
-                                    const typ = row.latestType ?? row.type ?? ''
-                                    const tot = row.latestTotal ?? row.total ?? ''
-                                    const status = row.latestStatus ?? row.status ?? row.lastStatus ?? ''
-                                    const last = row.lastActivity ?? row.timestamp ?? ''
+                                    const cells = formatAdminStudentSummaryCells(row)
+                                    const nick = cells.nickname
                                     return (
                                       <tr
                                         key={`${String(nick)}-f-${idx}`}
@@ -1598,24 +1672,23 @@ export default function App() {
                                           }
                                         }}
                                       >
-                                        <td className="border-b border-slate-100 px-2 py-2 font-medium text-slate-900">
-                                          {String(nick)}
-                                        </td>
-                                        <td className="border-b border-slate-100 px-2 py-2 text-slate-800">{String(level || '—')}</td>
-                                        <td className="border-b border-slate-100 px-2 py-2 tabular-nums text-slate-800">
-                                          {typeof diag === 'number' ? diag : String(diag || '—')}
-                                        </td>
-                                        <td className="max-w-[8rem] border-b border-slate-100 px-2 py-2 font-mono text-xs text-slate-800">
-                                          {String(prob || '—')}
-                                        </td>
-                                        <td className="border-b border-slate-100 px-2 py-2 text-slate-700">{String(typ || '—')}</td>
-                                        <td className="border-b border-slate-100 px-2 py-2 tabular-nums text-slate-800">
-                                          {tot === '' || tot == null ? '—' : String(tot)}
-                                        </td>
-                                        <td className="border-b border-slate-100 px-2 py-2 text-slate-800">{String(status || '—')}</td>
-                                        <td className="border-b border-slate-100 px-2 py-2 whitespace-nowrap text-xs text-slate-600">
-                                          {String(last || '—')}
-                                        </td>
+                                        {ADMIN_STUDENT_SUMMARY_COLUMNS.map((col) => (
+                                          <td
+                                            key={col.key}
+                                            className={`border-b border-slate-100 px-2 py-2 ${
+                                              col.key === 'nickname'
+                                                ? 'font-medium text-slate-900'
+                                                : col.key === 'lastActivity'
+                                                  ? 'whitespace-nowrap text-xs text-slate-600'
+                                                  : col.key === 'diagnosticScore' ||
+                                                      col.key.endsWith('Count')
+                                                    ? 'tabular-nums text-slate-800'
+                                                    : 'text-slate-800'
+                                            }`}
+                                          >
+                                            {cells[col.key]}
+                                          </td>
+                                        ))}
                                       </tr>
                                     )
                                   })}
@@ -1701,22 +1774,17 @@ export default function App() {
                 )
               ) : (
                 (() => {
-                  const row = adminStudentDetail
-                  const level = row.level ?? row.diagnosticTier ?? '—'
-                  const dsRaw = row.diag_score
-                  const diagScore =
-                    typeof dsRaw === 'number' && Number.isFinite(dsRaw)
-                      ? dsRaw
-                      : dsRaw !== '' && dsRaw != null && String(dsRaw).trim() !== '' && Number.isFinite(Number(dsRaw))
-                        ? Math.round(Number(dsRaw))
-                        : '—'
-                  const diagDone =
-                    row.hasDiagnosticResult === true ? '예' : row.hasDiagnosticResult === false ? '아니오' : '—'
-                  const prob = row.latestProblem ?? row.problem ?? ''
-                  const typ = row.latestType ?? row.type ?? ''
-                  const tot = row.latestTotal ?? row.total ?? ''
-                  const status = row.latestStatus ?? row.status ?? row.lastStatus ?? ''
-                  const last = row.lastActivity ?? row.timestamp ?? ''
+                  const summary = adminStudentSummary
+                  const pending = adminHistoryLoading
+                  const cells = formatAdminStudentSummaryCells(
+                    summary || {
+                      nickname: adminStudentDetail?.nickname,
+                      level: adminStudentDetail?.level,
+                      diag_score: adminStudentDetail?.diag_score,
+                      ...adminStudentDetail,
+                    },
+                    { pending },
+                  )
                   return (
                     <div className="space-y-6">
                       <section className="rounded-xl border border-slate-200 bg-slate-50/90 p-4">
@@ -1725,44 +1793,50 @@ export default function App() {
                           <div>
                             <dt className="text-xs font-semibold text-slate-500">닉네임</dt>
                             <dd className="mt-0.5 text-sm font-semibold text-slate-900">
-                              {String(row.nickname ?? row.닉네임 ?? '—')}
+                              {cells.nickname}
                             </dd>
                           </div>
                           <div>
                             <dt className="text-xs font-semibold text-slate-500">레벨</dt>
-                            <dd className="mt-0.5 text-sm text-slate-900">{String(level || '—')}</dd>
+                            <dd className="mt-0.5 text-sm text-slate-900">{cells.level}</dd>
                           </div>
                           <div>
                             <dt className="text-xs font-semibold text-slate-500">진단점수</dt>
+                            <dd className="mt-0.5 text-sm tabular-nums text-slate-900">{cells.diagnosticScore}</dd>
+                          </div>
+                          <div>
+                            <dt className="text-xs font-semibold text-slate-500">매쓰카드 수</dt>
                             <dd className="mt-0.5 text-sm tabular-nums text-slate-900">
-                              {typeof diagScore === 'number' ? diagScore : String(diagScore)}
+                              {cells.mathCardCount}
                             </dd>
                           </div>
                           <div>
-                            <dt className="text-xs font-semibold text-slate-500">진단 완료 여부</dt>
-                            <dd className="mt-0.5 text-sm font-semibold text-slate-900">{diagDone}</dd>
-                          </div>
-                          <div>
-                            <dt className="text-xs font-semibold text-slate-500">최근 문제</dt>
-                            <dd className="mt-0.5 font-mono text-sm text-slate-900">{String(prob || '—')}</dd>
-                          </div>
-                          <div>
-                            <dt className="text-xs font-semibold text-slate-500">문제 유형</dt>
-                            <dd className="mt-0.5 text-sm text-slate-900">{String(typ || '—')}</dd>
-                          </div>
-                          <div>
-                            <dt className="text-xs font-semibold text-slate-500">최근 점수</dt>
+                            <dt className="text-xs font-semibold text-slate-500">성공한 본문제 수</dt>
                             <dd className="mt-0.5 text-sm tabular-nums text-slate-900">
-                              {tot === '' || tot == null ? '—' : String(tot)}
+                              {cells.mainSuccessCount}
                             </dd>
                           </div>
                           <div>
-                            <dt className="text-xs font-semibold text-slate-500">상태</dt>
-                            <dd className="mt-0.5 text-sm text-slate-900">{String(status || '—')}</dd>
+                            <dt className="text-xs font-semibold text-slate-500">실패한 본문제 수</dt>
+                            <dd className="mt-0.5 text-sm tabular-nums text-slate-900">
+                              {cells.mainFailCount}
+                            </dd>
+                          </div>
+                          <div>
+                            <dt className="text-xs font-semibold text-slate-500">성공한 유사문제 수</dt>
+                            <dd className="mt-0.5 text-sm tabular-nums text-slate-900">
+                              {cells.similarSuccessCount}
+                            </dd>
+                          </div>
+                          <div>
+                            <dt className="text-xs font-semibold text-slate-500">실패한 유사문제 수</dt>
+                            <dd className="mt-0.5 text-sm tabular-nums text-slate-900">
+                              {cells.similarFailCount}
+                            </dd>
                           </div>
                           <div className="sm:col-span-2">
                             <dt className="text-xs font-semibold text-slate-500">최근 활동 시간</dt>
-                            <dd className="mt-0.5 text-sm text-slate-800">{String(last || '—')}</dd>
+                            <dd className="mt-0.5 text-sm text-slate-800">{cells.lastActivity}</dd>
                           </div>
                         </dl>
                       </section>
@@ -1770,7 +1844,7 @@ export default function App() {
                       <section>
                         <h3 className="text-sm font-black text-slate-800">전체 학습 이력</h3>
                         <p className="mt-1 text-xs text-slate-500">
-                          시간 순으로 진단·수련 기록을 확인할 수 있습니다.
+                          최근 기록이 위에 표시됩니다.
                         </p>
                         {adminHistoryLoading ? (
                           <p className="mt-4 text-sm font-semibold text-slate-600">기록을 불러오는 중…</p>
@@ -1782,16 +1856,16 @@ export default function App() {
                           </p>
                         ) : (
                           <div className="mt-3 max-h-[min(52vh,26rem)] overflow-auto rounded-lg border border-slate-200 bg-white">
-                            <table className="w-full min-w-[44rem] border-collapse text-left text-sm">
+                            <table className="w-full min-w-[36rem] border-collapse text-left text-sm">
                               <thead className="sticky top-0 z-[1] bg-slate-100 text-xs font-bold uppercase text-slate-600">
                                 <tr>
                                   <th className="border-b border-slate-200 px-2 py-2">구분</th>
-                                  <th className="border-b border-slate-200 px-2 py-2">문제</th>
-                                  <th className="border-b border-slate-200 px-2 py-2">유형</th>
-                                  <th className="border-b border-slate-200 px-2 py-2">점수</th>
-                                  <th className="border-b border-slate-200 px-2 py-2">힌트 횟수</th>
-                                  <th className="border-b border-slate-200 px-2 py-2">상태</th>
-                                  <th className="border-b border-slate-200 px-2 py-2 whitespace-nowrap">시간</th>
+                                  <th className="border-b border-slate-200 px-2 py-2">total</th>
+                                  <th className="border-b border-slate-200 px-2 py-2">fail_count</th>
+                                  <th className="border-b border-slate-200 px-2 py-2">status</th>
+                                  <th className="border-b border-slate-200 px-2 py-2 whitespace-nowrap">
+                                    timestamp
+                                  </th>
                                 </tr>
                               </thead>
                               <tbody>
@@ -1813,23 +1887,17 @@ export default function App() {
                                     <td className="border-b border-slate-100 px-2 py-2 font-medium text-slate-900">
                                       {adminHistoryCategoryLabel(rec)}
                                     </td>
-                                    <td className="max-w-[9rem] border-b border-slate-100 px-2 py-2 font-mono text-xs text-slate-900">
-                                      {String(rec.problem || '—')}
-                                    </td>
-                                    <td className="border-b border-slate-100 px-2 py-2 text-slate-800">
-                                      {String(rec.type || '—')}
+                                    <td className="border-b border-slate-100 px-2 py-2 tabular-nums text-slate-800">
+                                      {formatAdminHistoryNumericCell(rec.total)}
                                     </td>
                                     <td className="border-b border-slate-100 px-2 py-2 tabular-nums text-slate-800">
-                                      {rec.total === '' || rec.total == null ? '—' : String(rec.total)}
-                                    </td>
-                                    <td className="border-b border-slate-100 px-2 py-2 tabular-nums text-slate-700">
-                                      {rec.hint === '' || rec.hint == null ? '—' : String(rec.hint)}
+                                      {formatAdminHistoryNumericCell(rec.fail_count ?? rec.failCount)}
                                     </td>
                                     <td className="border-b border-slate-100 px-2 py-2 text-slate-800">
                                       {sheetStatusLabelForAdmin(rec)}
                                     </td>
                                     <td className="border-b border-slate-100 px-2 py-2 whitespace-nowrap text-xs text-slate-600">
-                                      {formatAdminSeoulSheetTimestampFromRecord(rec)}
+                                      {formatAdminHistoryTableTimestamp(rec)}
                                     </td>
                                   </tr>
                                 ))}
@@ -1843,6 +1911,75 @@ export default function App() {
                 })()
               )}
             </div>
+          </div>
+        </div>
+      ) : null}
+
+      {activeView === 'teacher-dashboard' && teacherDashStep === 'pickClass' && renameClassTarget ? (
+        <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 sm:p-6">
+          <button
+            type="button"
+            className="absolute inset-0 bg-slate-900/45 backdrop-blur-[1px]"
+            aria-label="이름 변경 닫기"
+            onClick={() => {
+              if (isRenameClassBusy) return
+              setRenameClassTarget(null)
+              setRenameClassName('')
+              setRenameClassError('')
+            }}
+          />
+          <div className="relative z-[101] w-full max-w-md rounded-2xl border border-blue-200 bg-white p-5 shadow-2xl shadow-blue-900/15">
+            <h3 className="text-lg font-black text-blue-950">클래스 이름 변경</h3>
+            <p className="mt-1 text-sm text-slate-600">
+              현재 이름:{' '}
+              <span className="font-semibold text-slate-900">
+                {String(renameClassTarget.displayName || renameClassTarget.className || '').trim() ||
+                  normalizeClassCode(renameClassTarget.classCode)}
+              </span>
+            </p>
+            <p className="mt-0.5 font-mono text-xs text-slate-500">
+              코드 ({normalizeClassCode(renameClassTarget.classCode)})는 변경되지 않습니다.
+            </p>
+            <form className="mt-4 space-y-3" onSubmit={handleRenameClassSubmit}>
+              <div>
+                <label className="block text-xs font-semibold text-slate-600" htmlFor="rename-class-name">
+                  새 이름
+                </label>
+                <input
+                  id="rename-class-name"
+                  type="text"
+                  value={renameClassName}
+                  onChange={(e) => setRenameClassName(e.target.value)}
+                  placeholder="새 클래스 이름"
+                  className="mt-1 w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm outline-none ring-blue-200 focus:ring-2"
+                  autoFocus
+                />
+              </div>
+              {renameClassError ? (
+                <p className="text-sm font-semibold text-red-600">{renameClassError}</p>
+              ) : null}
+              <div className="flex justify-end gap-2 pt-1">
+                <button
+                  type="button"
+                  disabled={isRenameClassBusy}
+                  onClick={() => {
+                    setRenameClassTarget(null)
+                    setRenameClassName('')
+                    setRenameClassError('')
+                  }}
+                  className="rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm font-bold text-slate-700 transition hover:bg-slate-50 disabled:opacity-60"
+                >
+                  취소
+                </button>
+                <button
+                  type="submit"
+                  disabled={isRenameClassBusy}
+                  className="rounded-lg bg-blue-600 px-4 py-2 text-sm font-bold text-white transition hover:bg-blue-700 disabled:opacity-60"
+                >
+                  {isRenameClassBusy ? '저장 중…' : '저장'}
+                </button>
+              </div>
+            </form>
           </div>
         </div>
       ) : null}

@@ -14,6 +14,70 @@ function normalizeRow(row) {
   return next
 }
 
+function attachKeywordFromLastColumn(row, fields, rawRow) {
+  const next = { ...(row || {}) }
+  const keywordKey = Object.keys(next).find((k) => String(k || '').trim().toLowerCase() === 'keyword')
+  if (keywordKey) {
+    next.keyword = String(next[keywordKey] ?? '').trim()
+    return next
+  }
+  const extra = rawRow?.__parsed_extra
+  if (Array.isArray(extra) && extra.length) {
+    const lastExtra = extra[extra.length - 1]
+    next.keyword = String(lastExtra ?? '').trim()
+    return next
+  }
+  const orderedFields = Array.isArray(fields) ? fields : []
+  const lastFieldRaw = orderedFields.length ? orderedFields[orderedFields.length - 1] : ''
+  const lastField = String(lastFieldRaw || '').trim()
+  if (!lastField) {
+    if (!Object.prototype.hasOwnProperty.call(next, 'keyword')) next.keyword = ''
+    return next
+  }
+  const keywordValue = next[lastField]
+  next.keyword = String(keywordValue ?? '').trim()
+  return next
+}
+
+function buildProblemRowKey(row) {
+  const stage = String(row?.['단계'] ?? '').trim()
+  const letter = String(row?.['유형'] ?? '').trim().toUpperCase()
+  const kind = String(row?.type ?? '').trim()
+  if (!stage || !letter || !kind) return ''
+  return `${stage}|${letter}|${kind}`
+}
+
+function buildKeywordLookupFromParsed(parsed) {
+  const fields = parsed?.meta?.fields ?? []
+  const rawRows = parsed?.data || []
+  const normalizedRows = rawRows.map(normalizeRow)
+  const lookup = new Map()
+  normalizedRows.forEach((row, idx) => {
+    const withKeyword = attachKeywordFromLastColumn(row, fields, rawRows[idx])
+    const key = buildProblemRowKey(withKeyword)
+    const keyword = String(withKeyword?.keyword ?? '').trim()
+    if (key && keyword) lookup.set(key, keyword)
+  })
+  return lookup
+}
+
+async function tryLoadKeywordLookupFromDist(fileName) {
+  try {
+    const distPath = `/dist/data/${fileName}`
+    const res = await fetch(distPath)
+    if (!res.ok) return new Map()
+    const text = await res.text()
+    const parsed = Papa.parse(text, {
+      header: true,
+      skipEmptyLines: 'greedy',
+    })
+    if (parsed.errors?.length) return new Map()
+    return buildKeywordLookupFromParsed(parsed)
+  } catch {
+    return new Map()
+  }
+}
+
 function normalizeMathCardProblemKey(rawProblem) {
   const text = String(rawProblem ?? '').trim().toUpperCase()
   // 예: "1-a" → "1-A"
@@ -58,7 +122,28 @@ export async function loadTrainingCsvRows(csvPath = DEFAULT_TRAINING_CSV_PATH) {
     console.log('[training-csv] loaded file:', fileName)
     console.log('[training-csv] headers:', parsed.meta?.fields ?? [])
   }
-  return (parsed.data || []).map(normalizeRow)
+  const rawRows = parsed.data || []
+  const normalizedRows = rawRows.map(normalizeRow)
+  if (/training_problems/i.test(fileName)) {
+    const fields = parsed.meta?.fields ?? []
+    let rowsWithKeyword = normalizedRows.map((row, idx) =>
+      attachKeywordFromLastColumn(row, fields, rawRows[idx])
+    )
+    const hasAnyKeyword = rowsWithKeyword.some((row) => String(row?.keyword ?? '').trim())
+    if (!hasAnyKeyword) {
+      const distKeywordLookup = await tryLoadKeywordLookupFromDist(fileName)
+      if (distKeywordLookup.size) {
+        rowsWithKeyword = rowsWithKeyword.map((row) => {
+          const key = buildProblemRowKey(row)
+          const keyword = key ? distKeywordLookup.get(key) : ''
+          if (!keyword) return row
+          return { ...row, keyword: String(keyword).trim() }
+        })
+      }
+    }
+    return rowsWithKeyword
+  }
+  return normalizedRows
 }
 
 export function groupTrainingRowsByLevel(rows, levelKey = DEFAULT_LEVEL_KEY) {

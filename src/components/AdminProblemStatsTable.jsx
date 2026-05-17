@@ -27,16 +27,23 @@ function AdminProblemTypeBarCharts({ rows }) {
         <p className="mt-0.5 text-[11px] text-slate-500">본문제, 유사문제1, 유사문제2의 평균 점수를 비교합니다.</p>
         <div className="mt-3 flex h-44 items-end justify-center gap-2 sm:gap-4" role="img" aria-label="유형별 평균 점수 막대 그래프">
           {chartData.map((d) => {
-            const h = Math.min(100, Math.max(4, (d.avgTotal / maxAvg) * 100))
+            const isZeroAvg = d.avgTotal <= 0
+            const hAvg = isZeroAvg ? 0 : Math.min(100, (d.avgTotal / maxAvg) * 100)
             return (
               <div key={`avg-${d.type}`} className="flex min-w-0 flex-1 flex-col items-center gap-1.5">
                 <span className="text-xs font-bold tabular-nums text-indigo-950">{d.avgTotal.toFixed(1)}</span>
-                <div className="flex h-32 w-full max-w-[4.5rem] flex-col justify-end rounded-t-md bg-white/80 shadow-inner shadow-slate-200/80">
-                  <div
-                    className="w-full rounded-t-md bg-gradient-to-t from-indigo-600 to-indigo-400 transition-all"
-                    style={{ height: `${h}%` }}
-                    title={`${d.type}: ${d.avgTotal.toFixed(1)}점`}
-                  />
+                <div
+                  className="flex h-32 w-full max-w-[4.5rem] flex-col justify-end rounded-t-md bg-white/80 shadow-inner shadow-slate-200/80"
+                  title={isZeroAvg ? `${d.type}: 0점` : `${d.type}: ${d.avgTotal.toFixed(1)}점`}
+                >
+                  {isZeroAvg ? (
+                    <span className="sr-only">{`${d.type} 평균 0점`}</span>
+                  ) : (
+                    <div
+                      className="w-full rounded-t-md bg-gradient-to-t from-indigo-600 to-indigo-400 transition-all"
+                      style={{ height: `${hAvg}%` }}
+                    />
+                  )}
                 </div>
                 <span className="max-w-full truncate text-center text-[11px] font-semibold text-slate-800" title={d.type}>
                   {d.type}

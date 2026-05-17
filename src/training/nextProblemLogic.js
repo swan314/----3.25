@@ -1,7 +1,7 @@
 function normalizeType(rawType) {
   const text = String(rawType || '').trim().replace(/\s+/g, '')
   if (!text) return ''
-  if (text === '본문제' || text === '유사문제1' || text === '유사문제2') return text
+  if (text === '본문제' || text === '유사문제1') return text
   return text
 }
 
@@ -23,11 +23,21 @@ function bumpProblemCode(problem) {
   return `${parsed.stage}-${nextCode}`
 }
 
-export function nextProblemLogic(type, total, problem = '', options = {}) {
+const MAIN_FAIL_THRESHOLD = 2
+
+/**
+ * @param {number} failCount 실패 단계 수 (새 규칙). 레거시 호출은 total(성공 횟수)로 넘어올 수 있음.
+ */
+export function nextProblemLogic(type, failCountOrLegacyTotal, problem = '', options = {}) {
   const normalizedType = normalizeType(type)
-  const normalizedTotal = Number.isFinite(Number(total)) ? Number(total) : 0
   const normalizedProblem = String(problem || '').trim().toUpperCase()
   const useSimilarProblems = options?.useSimilarProblems !== false
+
+  let failCount = Number(failCountOrLegacyTotal)
+  if (!Number.isFinite(failCount)) failCount = 0
+  if (options?.legacySuccessTotal === true) {
+    failCount = Math.max(0, 6 - failCount)
+  }
 
   if (!useSimilarProblems) {
     return {
@@ -37,7 +47,7 @@ export function nextProblemLogic(type, total, problem = '', options = {}) {
   }
 
   if (normalizedType === '본문제') {
-    if (normalizedTotal >= 5) {
+    if (failCount < MAIN_FAIL_THRESHOLD) {
       return {
         nextType: '본문제',
         nextProblem: bumpProblemCode(normalizedProblem),
@@ -49,18 +59,6 @@ export function nextProblemLogic(type, total, problem = '', options = {}) {
     }
   }
   if (normalizedType === '유사문제1') {
-    if (normalizedTotal >= 5) {
-      return {
-        nextType: '본문제',
-        nextProblem: bumpProblemCode(normalizedProblem),
-      }
-    }
-    return {
-      nextType: '유사문제2',
-      nextProblem: normalizedProblem,
-    }
-  }
-  if (normalizedType === '유사문제2') {
     return {
       nextType: '본문제',
       nextProblem: bumpProblemCode(normalizedProblem),
@@ -74,6 +72,6 @@ export function nextProblemLogic(type, total, problem = '', options = {}) {
 
 export function normalizeProblemType(type) {
   const text = String(type ?? '').trim().replace(/\s+/g, '')
-  if (text === '본문제' || text === '유사문제1' || text === '유사문제2') return text
+  if (text === '본문제' || text === '유사문제1') return text
   return normalizeType(type)
 }

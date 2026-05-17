@@ -100,6 +100,11 @@ function normalizeKoreanNumberWords(text) {
   return out
 }
 
+/** 「십의 자리 숫자」↔「십의 자리수」 등 자릿수 표현 통일 */
+function canonicalizeDigitPlacePhrasing(text) {
+  return String(text ?? '').replace(/자리숫자/g, '자리수')
+}
+
 function normalizeSemanticAnswer(raw) {
   const base = normalizeKoreanNumberWords(raw)
     .toLowerCase()
@@ -109,7 +114,9 @@ function normalizeSemanticAnswer(raw) {
     /(의|은|는|이|가|를|을|에|에서|에게|으로|로|와|과|도|만|까지|부터)/g,
     ''
   )
-  return withoutParticles.replace(/[^0-9a-z가-힣]/g, '')
+  return canonicalizeDigitPlacePhrasing(
+    withoutParticles.replace(/[^0-9a-z가-힣]/g, ''),
+  )
 }
 
 function extractCoreKeywords(raw) {
@@ -173,6 +180,9 @@ function parseNumericExpressionValue(raw) {
 
 /** 비계1·2 빈칸 전용 — 조사 제거·띄어쓰기 등 유연 비교 (포함 매칭 없음, '14'⊃'1' 오판 방지) */
 function areEquivalentAnswers(lhs, rhs) {
+  const nu = numericEquivalenceWithOptionalUnits(lhs, rhs)
+  if (nu !== null) return nu
+
   const left = normalizeLooseAnswer(lhs)
   const right = normalizeLooseAnswer(rhs)
   if (!left || !right) return false
@@ -320,14 +330,34 @@ function normalizeNumericAnswer(input) {
   return null
 }
 
+function extractLeadingSemanticNumber(raw) {
+  const sem = normalizeSemanticAnswer(raw)
+  const m = sem.match(/^(\d+(?:\.\d+)?)/)
+  return m ? m[1] : null
+}
+
+const FLEXIBLE_SIMILARITY_THRESHOLD = 0.8
+
 function isFlexibleCorrect(studentAnswer, correctAnswer) {
   const rawStudent = String(studentAnswer ?? '').trim()
   const rawCorrect = String(correctAnswer ?? '').trim()
   if (!rawStudent || !rawCorrect) return false
 
-  if (isPureNumber(rawCorrect)) {
-    const normalizedStudentNumber = normalizeNumericAnswer(rawStudent)
-    return normalizedStudentNumber === rawCorrect
+  if (looksLikeMathExpression(rawCorrect) || looksLikeMathExpression(rawStudent)) {
+    return isMathExpressionEquivalent(rawStudent, rawCorrect)
+  }
+
+  const stripX = (t) => String(t ?? '').replace(/^x\s*=\s*/i, '').trim()
+  const studentNoX = stripX(rawStudent)
+  const correctNoX = stripX(rawCorrect)
+  if (studentNoX && correctNoX && normalizeLooseAnswer(studentNoX) === normalizeLooseAnswer(correctNoX)) {
+    return true
+  }
+
+  if (isPureNumber(rawCorrect) || isPureNumber(correctNoX)) {
+    const target = isPureNumber(rawCorrect) ? rawCorrect : correctNoX
+    const normalizedStudentNumber = normalizeNumericAnswer(rawStudent) ?? normalizeNumericAnswer(studentNoX)
+    return normalizedStudentNumber === target
   }
 
   const student = normalizeText(rawStudent)
@@ -339,9 +369,26 @@ function isFlexibleCorrect(studentAnswer, correctAnswer) {
   const semCorrect = normalizeSemanticAnswer(rawCorrect)
   if (semStudent && semCorrect && semStudent === semCorrect) return true
 
-  if (rawCorrect.length >= 6 && rawStudent.length >= 6) {
-    const sim = diceSimilarity(semStudent || student, semCorrect || correct)
-    if (sim >= 0.92) return true
+  if (semCorrect.length >= 2 && semStudent.length >= 2) {
+    if (semCorrect.includes(semStudent)) return true
+    if (semStudent.includes(semCorrect)) return true
+  }
+
+  const keywords = extractCoreKeywords(rawCorrect)
+  if (keywords.length > 0) {
+    const haystack = semStudent || student
+    if (keywords.every((kw) => haystack.includes(kw))) return true
+  }
+
+  const correctCoreNum = extractLeadingSemanticNumber(rawCorrect)
+  const studentNum = normalizeNumericAnswer(rawStudent) ?? normalizeNumericAnswer(studentNoX)
+  if (correctCoreNum && studentNum && studentNum === correctCoreNum) return true
+
+  const simLeft = semStudent || student
+  const simRight = semCorrect || correct
+  if (simLeft.length >= 3 && simRight.length >= 3) {
+    const sim = diceSimilarity(simLeft, simRight)
+    if (sim >= FLEXIBLE_SIMILARITY_THRESHOLD) return true
   }
 
   return false
@@ -351,26 +398,141 @@ function isFlexibleCorrect(studentAnswer, correctAnswer) {
 function requiresFullSymbolicMatch(expectedRaw) {
   const t = String(expectedRaw ?? '').trim()
   if (/=/.test(t)) return true
+  const compact = t.replace(/\s+/g, '').replace(/[−–]/g, '-')
+  const withoutUnits = stripTrailingUnits(compact)
+  if (/^-?\d+(?:\.\d+)?$/.test(withoutUnits)) return false
   return /[a-z]/i.test(t)
-}
-
-function stripTrailingUnits(raw) {
-  return String(raw ?? '')
-    .trim()
-    .replace(/\s+/g, '')
-    .replace(/(?:년|명|개|살|마리|자루|권|원|분|시간|초|m)$/i, '')
 }
 
 const NUMERIC_EQ_TOLERANCE = 1e-6
 
-function hasMultipleAnswerTokens(raw) {
-  const text = String(raw ?? '').trim()
-  if (!text) return false
-  const tokens = text
-    .split(/[,\n]/)
-    .map((v) => String(v || '').trim())
+/**
+ * 긴 단위 접미사부터 제거 (cm 전에 m만 지우는 오류 방지).
+ * 채점: 정답이 "10cm"일 때 학생이 "10"만 적어도 숫자 일치로 인정.
+ */
+const TRAILING_UNIT_SUFFIXES_LONGEST_FIRST = [
+  'km²',
+  'm²',
+  'cm²',
+  'mm²',
+  'dm²',
+  'cm',
+  'mm',
+  'km',
+  'dm',
+  'nm',
+  'kg',
+  'mg',
+  'ml',
+  'mL',
+  'dl',
+  'cl',
+  '만원',
+  '시간',
+  '자루',
+  '마리',
+  '명',
+  '개',
+  '살',
+  '권',
+  '원',
+  '년',
+  '분',
+  '초',
+  't',
+  'm',
+  'g',
+  'L',
+]
+
+function stripTrailingUnits(raw) {
+  let s = String(raw ?? '')
+    .trim()
+    .replace(/\s+/g, '')
+    .replace(/[−–]/g, '-')
+  let prev = ''
+  while (s !== prev) {
+    prev = s
+    const lower = s.toLowerCase()
+    for (let i = 0; i < TRAILING_UNIT_SUFFIXES_LONGEST_FIRST.length; i += 1) {
+      const u = TRAILING_UNIT_SUFFIXES_LONGEST_FIRST[i]
+      const ul = u.toLowerCase()
+      if (lower.endsWith(ul)) {
+        s = s.slice(0, -u.length)
+        break
+      }
+    }
+  }
+  return s
+}
+
+/** 숫자 직후부터 문자열 끝까지 (단위 후보) */
+function unitSuffixAfterLeadingNumber(compact) {
+  const m = String(compact ?? '').match(/^(-?\d+(?:\.\d+)?)(.*)$/)
+  return m && m[2] ? m[2] : ''
+}
+
+function normalizeUnitSuffix(u) {
+  return String(u || '').toLowerCase()
+}
+
+/**
+ * 정답이 숫자+선택 단위일 때: 학생 숫자만 → 인정.
+ * 학생도 단위를 붙이면 숫자 일치 + 단위 일치해야 함 (10m ≠ 10cm).
+ * 해당 패턴이 아니면 null (기존 로직으로).
+ * @returns {boolean|null}
+ */
+function numericEquivalenceWithOptionalUnits(studentRaw, expectedRaw) {
+  const exp = String(expectedRaw ?? '').trim()
+  const stud = String(studentRaw ?? '').trim()
+  if (!exp || !stud) return null
+
+  const expC = exp.replace(/\s+/g, '').replace(/[−–]/g, '-')
+  const studC = stud.replace(/\s+/g, '').replace(/[−–]/g, '-')
+
+  const expCore = stripTrailingUnits(expC)
+  if (!/^-?\d+(?:\.\d+)?$/.test(expCore)) return null
+
+  const vExp = Number(expCore)
+  if (!Number.isFinite(vExp)) return null
+
+  // 학생 답이 숫자만 → 정답 숫자와 같으면 정답 (단위 생략 허용)
+  if (/^-?\d+(?:\.\d+)?$/.test(studC)) {
+    return Math.abs(Number(studC) - vExp) <= NUMERIC_EQ_TOLERANCE
+  }
+
+  const studCore = stripTrailingUnits(studC)
+  if (!/^-?\d+(?:\.\d+)?$/.test(studCore)) return null
+  if (Math.abs(Number(studCore) - vExp) > NUMERIC_EQ_TOLERANCE) return false
+
+  const uExp = unitSuffixAfterLeadingNumber(expC)
+  const uStud = unitSuffixAfterLeadingNumber(studC)
+
+  // 정답에 단위 없음인데 학생이 단위만 덧붙인 경우: 숫자만 같으면 인정
+  if (!uExp && uStud) {
+    return Math.abs(Number(studCore) - vExp) <= NUMERIC_EQ_TOLERANCE
+  }
+
+  if (!uStud) return true
+  if (!uExp) return null
+  return normalizeUnitSuffix(uExp) === normalizeUnitSuffix(uStud)
+}
+
+/** 쉼표로 구분된 수식 목록 (순서 유지) */
+function splitCommaSeparatedExpressions(raw) {
+  return String(raw ?? '')
+    .split(',')
+    .map((part) => stripAnswerChoiceMarkers(part.trim()))
     .filter(Boolean)
-  return tokens.length >= 2
+}
+
+function hasMultipleAnswerTokens(raw) {
+  return splitCommaSeparatedExpressions(raw).length >= 2
+}
+
+function looksLikeOrderedCommaMathList(parts) {
+  if (!parts.length) return false
+  return parts.every((part) => looksLikeMathExpression(part))
 }
 
 function gcdBigInt(a, b) {
@@ -465,6 +627,9 @@ function strictNumericEquivalence(studentRaw, expectedRaw) {
   // 이 케이스는 전체 문자열/쌍 비교 로직에서만 통과해야 한다.
   if (hasMultipleAnswerTokens(studentRaw) || hasMultipleAnswerTokens(expectedRaw)) return false
 
+  const unitEq = numericEquivalenceWithOptionalUnits(studentRaw, expectedRaw)
+  if (unitEq !== null) return unitEq
+
   if (requiresFullSymbolicMatch(expectedRaw)) return false
   if (requiresFullSymbolicMatch(studentRaw)) return false
 
@@ -492,14 +657,37 @@ function strictNumericEquivalence(studentRaw, expectedRaw) {
 }
 
 /**
+ * 쉼표로 구분된 복수 수식 — 항목별 정규화 후 같은 순서로 모두 일치해야 정답.
+ * @returns {boolean|null} null이면 단일 수식 비교로 위임
+ */
+function tryMatchesOrderedCommaExpressions(studentRaw, expectedRaw, options = {}) {
+  const studentParts = splitCommaSeparatedExpressions(studentRaw)
+  const expectedParts = splitCommaSeparatedExpressions(expectedRaw)
+  const studentHasComma = String(studentRaw ?? '').includes(',')
+  const expectedHasComma = String(expectedRaw ?? '').includes(',')
+  if (!studentHasComma && !expectedHasComma) return null
+  if (studentParts.length !== expectedParts.length) return false
+  if (studentParts.length < 2) return false
+  if (
+    !looksLikeOrderedCommaMathList(studentParts) &&
+    !looksLikeOrderedCommaMathList(expectedParts)
+  ) {
+    return null
+  }
+  return studentParts.every((studentPart, index) =>
+    matchesSingleExpressionStrict(studentPart, expectedParts[index], options)
+  )
+}
+
+/**
  * 비계3~6 — 공백·표기 통일 후 전체 일치 또는 (비식 형태 아닐 때만) 숫자값 동치.
  * 포함 비교·부분 숫자 일치 금지.
  */
-function matchesScaffoldStrict(studentRaw, expectedRaw, options = {}) {
+function matchesSingleExpressionStrict(studentRaw, expectedRaw, options = {}) {
   const {
     allowSwappedEquationSides = false,
     allowUnorderedPair = false,
-    mathEquivalentMode = 'none',
+    mathEquivalentMode = 'auto',
   } = options
 
   const exp = normalizeLooseAnswer(expectedRaw)
@@ -507,13 +695,15 @@ function matchesScaffoldStrict(studentRaw, expectedRaw, options = {}) {
   if (!st) return false
   if (exp === st) return true
 
-  if (mathEquivalentMode === 'addition' && !exp.includes('=') && !st.includes('=')) {
-    if (isMathExpressionEquivalent(studentRaw, expectedRaw)) return true
-  }
-
-  if (mathEquivalentMode === 'equation' && exp.includes('=') && st.includes('=')) {
-    if (isMathExpressionEquivalent(studentRaw, expectedRaw)) return true
-  }
+  const tryMath =
+    mathEquivalentMode === 'auto'
+      ? looksLikeMathExpression(studentRaw) || looksLikeMathExpression(expectedRaw)
+      : mathEquivalentMode === 'addition'
+        ? !exp.includes('=') && !st.includes('=')
+        : mathEquivalentMode === 'equation'
+          ? exp.includes('=') && st.includes('=')
+          : false
+  if (tryMath && isMathExpressionEquivalent(studentRaw, expectedRaw)) return true
 
   if (allowUnorderedPair && isUnorderedPairMatch(studentRaw, expectedRaw)) return true
 
@@ -524,18 +714,30 @@ function matchesScaffoldStrict(studentRaw, expectedRaw, options = {}) {
 
   if (strictNumericEquivalence(studentRaw, expectedRaw)) return true
 
+  if (isFlexibleCorrect(studentRaw, expectedRaw)) return true
+
   return false
+}
+
+function matchesScaffoldStrict(studentRaw, expectedRaw, options = {}) {
+  const ordered = tryMatchesOrderedCommaExpressions(studentRaw, expectedRaw, options)
+  if (ordered !== null) return ordered
+  return matchesSingleExpressionStrict(studentRaw, expectedRaw, options)
 }
 
 /**
  * 비계1·2 빈칸 외 문자열 입력이 생기면 유연 규칙 적용 (현재는 거의 빈칸만 사용).
  */
-function matchesScaffoldFlexible(studentRaw, expectedRaw, options = {}) {
+function matchesSingleExpressionFlexible(studentRaw, expectedRaw, options = {}) {
   const { allowSwappedEquationSides = false, allowUnorderedPair = false } = options
   const exp = normalizeLooseAnswer(expectedRaw)
   const st = normalizeLooseAnswer(studentRaw)
   if (!st) return false
   if (exp === st) return true
+
+  if (looksLikeMathExpression(studentRaw) || looksLikeMathExpression(expectedRaw)) {
+    if (isMathExpressionEquivalent(studentRaw, expectedRaw)) return true
+  }
 
   if (allowUnorderedPair && isUnorderedPairMatch(studentRaw, expectedRaw)) return true
 
@@ -544,6 +746,9 @@ function matchesScaffoldFlexible(studentRaw, expectedRaw, options = {}) {
   const stripXeq = (t) => t.replace(/^x\s*=\s*/i, '')
   if (stripXeq(st) === stripXeq(exp)) return true
 
+  const unitEqFlex = numericEquivalenceWithOptionalUnits(studentRaw, expectedRaw)
+  if (unitEqFlex !== null) return unitEqFlex
+
   const lNum = parseNumericExpressionValue(normalizeLooseAnswer(studentRaw))
   const rNum = parseNumericExpressionValue(normalizeLooseAnswer(expectedRaw))
   if (Number.isFinite(lNum) && Number.isFinite(rNum) && Math.abs(lNum - rNum) < 1e-9) return true
@@ -551,8 +756,50 @@ function matchesScaffoldFlexible(studentRaw, expectedRaw, options = {}) {
   return isFlexibleCorrect(studentRaw, expectedRaw)
 }
 
+function matchesScaffoldFlexible(studentRaw, expectedRaw, options = {}) {
+  const ordered = tryMatchesOrderedCommaExpressions(studentRaw, expectedRaw, options)
+  if (ordered !== null) return ordered
+  return matchesSingleExpressionFlexible(studentRaw, expectedRaw, options)
+}
+
+const ANSWER_CHOICE_MARKERS_RE = /[①②③④⑤⑥⑦⑧⑨⑩]/g
+
+/** 정답 셀·학생 입력에서 ①②③④ 등 선택 번호 기호 제거 (숫자 정답 앞자리는 제거하지 않음) */
+export function stripAnswerChoiceMarkers(raw) {
+  return String(raw ?? '')
+    .replace(ANSWER_CHOICE_MARKERS_RE, '')
+    .replace(/^\s*([1-9])[.)、)]\s+/, '')
+    .trim()
+}
+
+/**
+ * 줄바꿈·번호 기호로 구분된 복수 정답 후보 (OR). 쉼표 구분 수식 목록은 제외.
+ * @returns {string[]}
+ */
+export function parseExpectedAnswerAlternatives(raw) {
+  const text = String(raw ?? '').trim()
+  if (!text) return []
+  const hasMarkers = /[①②③④⑤⑥⑦⑧⑨⑩]/.test(text)
+  if (hasMarkers) {
+    return text
+      .split(/[\n,]+/)
+      .map((p) => stripAnswerChoiceMarkers(p))
+      .filter(Boolean)
+  }
+  if (/\n/.test(text)) {
+    return text
+      .split(/\n+/)
+      .map((p) => stripAnswerChoiceMarkers(p))
+      .filter(Boolean)
+  }
+  const single = stripAnswerChoiceMarkers(text)
+  return single ? [single] : []
+}
+
 function normalizeEquationSide(t) {
-  return normalizeLooseAnswer(t).replace(/[{}[\]]/g, '').replace(/×/g, '*')
+  let s = normalizeLooseAnswer(t).replace(/[{}[\]]/g, '').replace(/×/g, '*')
+  s = s.replace(/(\d)([a-z])/gi, '$1*$2')
+  return s
 }
 
 function stripOuterParens(raw) {
@@ -632,30 +879,39 @@ function removeCoefficientOneParentheses(raw) {
   return out
 }
 
-function splitTopLevelPlus(raw) {
-  const text = String(raw ?? '')
+/** 덧셈·뺄셈 최상위 항 분리 (교환·결합법칙 정규화용) */
+function splitTopLevelSignedTerms(raw) {
+  const text = String(raw ?? '').trim()
+  if (!text) return []
   const out = []
+  let sign = '+'
   let cur = ''
   let depth = 0
   for (let i = 0; i < text.length; i += 1) {
     const ch = text[i]
     if (ch === '(') depth += 1
     if (ch === ')') depth = Math.max(0, depth - 1)
-    if (ch === '+' && depth === 0) {
-      out.push(cur)
+    if ((ch === '+' || ch === '-') && depth === 0) {
+      if (i === 0 && ch === '-') {
+        sign = '-'
+        continue
+      }
+      if (i === 0 && ch === '+') continue
+      if (cur) out.push(`${sign === '-' ? '-' : ''}${cur}`)
+      sign = ch
       cur = ''
       continue
     }
     cur += ch
   }
-  out.push(cur)
+  if (cur) out.push(`${sign === '-' ? '-' : ''}${cur}`)
   return out
 }
 
 function canonicalizeAdditionExpression(raw) {
   const normalized = normalizeEquationSide(removeCoefficientOneParentheses(raw))
   if (!normalized) return ''
-  const terms = splitTopLevelPlus(normalized)
+  const terms = splitTopLevelSignedTerms(normalized)
     .map((v) => stripOuterParens(removeCoefficientOneParentheses(v)))
     .map((v) => v.trim())
     .filter(Boolean)
@@ -663,10 +919,48 @@ function canonicalizeAdditionExpression(raw) {
   return terms.join('+')
 }
 
+/** 정규화된 덧셈식의 모든 항 부호 반전 (예: 1000*x+4000 → -1000*x+-4000) */
+function negateCanonicalAdditionExpression(canonical) {
+  if (!canonical) return ''
+  return splitTopLevelSignedTerms(canonical)
+    .map((term) => {
+      if (term.startsWith('-')) {
+        const body = term.slice(1)
+        return body || ''
+      }
+      return `-${term}`
+    })
+    .filter(Boolean)
+    .sort()
+    .join('+')
+}
+
+/**
+ * 등식 동치용 서명: 좌우 교환·양변 부호 동시 반전을 하나의 키로 통일.
+ * 1000x=4000, 4000=1000x, -1000x=-4000, -4000=-1000x → 동일
+ */
+function equationEquivalenceSignature(leftRaw, rightRaw) {
+  const left = canonicalizeAdditionExpression(leftRaw)
+  const right = canonicalizeAdditionExpression(rightRaw)
+  if (!left || !right) return ''
+  const negLeft = negateCanonicalAdditionExpression(left)
+  const negRight = negateCanonicalAdditionExpression(right)
+  const pairKey = (a, b) => [a, b].sort().join('|')
+  const candidates = [pairKey(left, right), pairKey(negLeft, negRight)].filter(Boolean)
+  return candidates.sort()[0] ?? ''
+}
+
+function looksLikeMathExpression(raw) {
+  const t = normalizeEquationSide(raw)
+  if (!t) return false
+  if (t.includes('=')) return true
+  return /[+\-*/]/.test(t) && /[a-z0-9]/i.test(t)
+}
+
 /**
  * 수학식 동치 비교:
  * - 덧셈식은 '+' 항 정렬 비교
- * - 방정식은 좌우 동일/교환 비교
+ * - 방정식은 좌우 교환·양변 부호 반전까지 동치
  * - 포함 비교는 사용하지 않음
  */
 export function isMathExpressionEquivalent(studentRaw, expectedRaw) {
@@ -688,15 +982,9 @@ export function isMathExpressionEquivalent(studentRaw, expectedRaw) {
   if (sRest.length || eRest.length) return false
   if (sLeft == null || sRight == null || eLeft == null || eRight == null) return false
 
-  const sameOrder =
-    canonicalizeAdditionExpression(sLeft) === canonicalizeAdditionExpression(eLeft) &&
-    canonicalizeAdditionExpression(sRight) === canonicalizeAdditionExpression(eRight)
-  if (sameOrder) return true
-
-  return (
-    canonicalizeAdditionExpression(sLeft) === canonicalizeAdditionExpression(eRight) &&
-    canonicalizeAdditionExpression(sRight) === canonicalizeAdditionExpression(eLeft)
-  )
+  const studentSig = equationEquivalenceSignature(sLeft, sRight)
+  const expectedSig = equationEquivalenceSignature(eLeft, eRight)
+  return Boolean(studentSig) && studentSig === expectedSig
 }
 
 function isSwappedEquationMatch(studentRaw, expectedRaw) {
@@ -709,11 +997,7 @@ function isSwappedEquationMatch(studentRaw, expectedRaw) {
 }
 
 function splitNormalizedAnswers(raw) {
-  return (raw ?? '')
-    .toString()
-    .split(/[,\n]/)
-    .map((v) => normalizeLooseAnswer(v))
-    .filter(Boolean)
+  return splitCommaSeparatedExpressions(raw).map((v) => normalizeLooseAnswer(v)).filter(Boolean)
 }
 
 function isUnorderedPairMatch(studentRaw, expectedRaw) {
@@ -730,8 +1014,19 @@ function isUnorderedPairMatch(studentRaw, expectedRaw) {
  */
 export function matchesScaffoldExpected(studentRaw, expectedRaw, options = {}) {
   const { flexible = false, ...rest } = options
-  if (flexible) return matchesScaffoldFlexible(studentRaw, expectedRaw, rest)
-  return matchesScaffoldStrict(studentRaw, expectedRaw, rest)
+  const student = stripAnswerChoiceMarkers(studentRaw)
+  if (!student) return false
+  const expected = stripAnswerChoiceMarkers(expectedRaw)
+  const matcher = flexible ? matchesScaffoldFlexible : matchesScaffoldStrict
+
+  if (hasMultipleAnswerTokens(student) && hasMultipleAnswerTokens(expected)) {
+    const ordered = tryMatchesOrderedCommaExpressions(student, expected, rest)
+    if (ordered !== null) return ordered
+  }
+
+  const alternatives = parseExpectedAnswerAlternatives(expectedRaw)
+  if (!alternatives.length) return false
+  return alternatives.some((exp) => matcher(student, exp, rest))
 }
 
 /**

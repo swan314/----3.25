@@ -326,10 +326,10 @@ code {
   flex: 1 1 auto;
   display: flex;
   align-items: center;
-  justify-content: center;
+  justify-content: flex-start;
   box-sizing: border-box;
   min-height: 0;
-  padding: 12px 16px 20px;
+  padding: 8px 16px 18px;
   width: 100%;
 }
 
@@ -437,17 +437,17 @@ code {
   border-radius: 18px;
   background: rgba(255, 255, 255, 0.7);
   box-shadow: var(--shadow);
-  padding: 28px 26px 24px;
+  padding: 22px 26px 20px;
   display: flex;
   flex-direction: column;
-  gap: 18px;
+  gap: 10px;
   text-align: center;
 }
 
 .mm-hero-row {
   display: flex;
   justify-content: center;
-  gap: 10px;
+  gap: 5px;
   flex-wrap: nowrap;
 }
 
@@ -457,6 +457,9 @@ code {
   border: 1px solid var(--border);
   border-radius: 12px;
   background: rgba(255, 255, 255, 0.7);
+  box-shadow:
+    0 2px 8px rgba(29, 78, 216, 0.1),
+    0 1px 3px rgba(15, 23, 42, 0.06);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -473,7 +476,7 @@ code {
   margin: 0;
   font-size: 42px;
   letter-spacing: -1.2px;
-  line-height: 1.18;
+  line-height: 1.16;
   color: var(--accent);
   font-weight: 700;
 }
@@ -482,13 +485,26 @@ code {
   margin: 0;
   color: var(--text);
   font-size: 18px;
-  line-height: 1.65;
+  line-height: 1.55;
 }
 
 .mm-cta-row {
   display: flex;
   justify-content: center;
-  padding-top: 4px;
+  padding-top: 0;
+  margin-top: -4px;
+}
+
+.mm-welcome-card .mm-btn-primary {
+  padding: 17px 28px;
+  min-width: 252px;
+  font-size: 19px;
+  box-shadow: 0 14px 32px rgba(37, 99, 235, 0.4);
+}
+
+.mm-welcome-card .mm-btn-primary:hover {
+  filter: brightness(1.05);
+  box-shadow: 0 20px 42px rgba(37, 99, 235, 0.46);
 }
 
 .mm-btn-primary {
@@ -524,11 +540,16 @@ code {
   border: 1px solid var(--border);
   border-radius: 14px;
   background: var(--social-bg);
-  padding: 16px 16px 14px;
+  padding: 14px 16px 12px;
+  margin-top: 2px;
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  gap: 8px;
   text-align: left;
+}
+
+.mm-welcome-card .mm-mini-panel {
+  border-color: rgba(243, 215, 122, 0.52);
 }
 
 .mm-mini-title {
@@ -569,6 +590,15 @@ code {
 
 .mm-link:hover {
   color: var(--text-h);
+}
+
+.mm-footer-note {
+  margin: 0;
+  font-size: 14px;
+  line-height: 1.45;
+  color: var(--text);
+  opacity: 0.88;
+  letter-spacing: 0.02em;
 }
 
 .mm-simple-card {
@@ -629,6 +659,16 @@ code {
   .mm-simple-card {
     background: rgba(22, 23, 29, 0.72);
   }
+
+  .mm-welcome-card .mm-mini-panel {
+    border-color: rgba(138, 122, 50, 0.42);
+  }
+
+  .mm-hero-card {
+    box-shadow:
+      0 2px 10px rgba(59, 130, 246, 0.14),
+      0 1px 4px rgba(0, 0, 0, 0.22);
+  }
 }
 
 @media (max-width: 1024px) {
@@ -637,7 +677,7 @@ code {
   }
 
   .mm-adventure-band {
-    padding: 10px 12px 16px;
+    padding: 6px 12px 14px;
   }
 
   .mm-title-top {
@@ -662,11 +702,12 @@ code {
   }
 
   .mm-welcome-card {
-    padding: 22px 18px 18px;
+    padding: 18px 18px 14px;
+    gap: 9px;
   }
 
   .mm-hero-row {
-    gap: 6px;
+    gap: 4px;
   }
 
   .mm-hero-card {

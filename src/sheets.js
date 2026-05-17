@@ -6,6 +6,20 @@ import {
   recordMatchesLearner,
 } from './classCode.js'
 import { resolveCanonicalDiagnosticTier } from './levelConfig.js'
+import {
+  applySheetProblemOutcomeLists,
+  computeTrainingProblemProgressByCode,
+  computeTrainingProgressMapByProblem,
+} from './training/trainingProblemProgress.js'
+import {
+  collectFailedProblemCodesFromRecords,
+  collectSuccessProblemCodesFromRecords,
+  isDiagnosticSheetStatus,
+  normalizeProblemCodeList,
+  resolveRecordSheetStatus,
+  resolveTrainingSaveStatus,
+  SHEET_STATUS,
+} from './training/trainingStatus.js'
 
 export const API_URL = (import.meta.env.VITE_API_URL || '').toString().trim()
 
@@ -15,11 +29,16 @@ export const AI_FEEDBACK_STORAGE_MAX_CHARS = 50000
 /**
  * 로컬 개발에서만 `VITE_API_PROXY=/api/gas`(vite.config 프록시)로 POST JSON 응답 수신.
  * 프로덕션 빌드에서는 항상 `VITE_API_URL` → CORS 시 JSONP 폴백.
+ * 관리자 문제 분석 등 JSON 응답이 필요한 POST에도 동일 URL 사용.
  */
-function resolveAiFeedbackPostUrl() {
+export function resolveGasWebhookPostUrl() {
   const p = (import.meta.env.VITE_API_PROXY || '').toString().trim()
   if (import.meta.env.DEV && p) return p.startsWith('/') ? p : `/${p}`
   return API_URL
+}
+
+function resolveAiFeedbackPostUrl() {
+  return resolveGasWebhookPostUrl()
 }
 
 function getNicknameFromHashSafe() {
@@ -39,21 +58,28 @@ function getClassCodeFromHashSafe() {
 }
 
 function normalizeScoresArray(raw) {
-  if (!Array.isArray(raw)) return new Array(6).fill(0)
-  const normalized = raw.slice(0, 6).map((v) => (Number(v) > 0 ? 1 : 0))
-  while (normalized.length < 6) normalized.push(0)
-  return normalized
+  if (!Array.isArray(raw)) return []
+  return raw.map((v) => {
+    if (v === '' || v == null) return ''
+    if (v === 0 || v === '0') return 0
+    return Number(v) > 0 ? 1 : 0
+  })
 }
 
 function toSheetRowPayload(payload = {}) {
-  const scores = normalizeScoresArray(payload?.scores)
-  const score = Number.isFinite(Number(payload?.score))
-    ? Number(payload.score)
-    : Number.isFinite(Number(payload?.totalScore))
-      ? Number(payload.totalScore)
-      : Number.isFinite(Number(payload?.total))
-        ? Number(payload.total)
-        : scores.reduce((sum, v) => sum + v, 0)
+  const statusRaw = normalizeStatus(payload?.status)
+  const isDiagnostic = isDiagnosticSheetStatus(statusRaw)
+  const scores = isDiagnostic ? [] : normalizeScoresArray(payload?.scores)
+  const scoreFromSteps = scores.filter((v) => v === 0 || v === 1).reduce((sum, v) => sum + Number(v), 0)
+  const score = isDiagnostic
+    ? ''
+    : Number.isFinite(Number(payload?.score))
+      ? Number(payload.score)
+      : Number.isFinite(Number(payload?.totalScore))
+        ? Number(payload.totalScore)
+        : Number.isFinite(Number(payload?.total))
+          ? Number(payload.total)
+          : scoreFromSteps
   const totalHint = Number.isFinite(Number(payload?.totalHint))
     ? Number(payload.totalHint)
     : Number.isFinite(Number(payload?.hint))
@@ -91,6 +117,9 @@ function toSheetRowPayload(payload = {}) {
   const classCode = normalizeClassCode(
     payload?.classCode ?? payload?.클래스코드 ?? getClassCodeFromHashSafe()
   )
+  const failRaw = payload?.fail_count ?? payload?.failCount
+  const totalRaw = payload?.total ?? payload?.successCount
+
   return {
     ...payload,
     nickname: (
@@ -100,19 +129,27 @@ function toSheetRowPayload(payload = {}) {
       '익명'
     ).toString(),
     classCode,
-    level: '',
-    diag_score: '',
-    diag_time: '',
-    problem,
-    item,
-    phase,
+    level: isDiagnostic ? String(payload?.level ?? '').trim() : '',
+    diag_score: isDiagnostic
+      ? payload?.diag_score ?? payload?.score ?? payload?.totalScore ?? ''
+      : '',
+    diag_time: isDiagnostic
+      ? String(payload?.diag_time ?? payload?.completedAt ?? '').trim()
+      : '',
+    problem: isDiagnostic ? '' : problem,
+    item: isDiagnostic ? '' : item,
+    phase: isDiagnostic ? '' : phase,
     scores,
-    score,
-    totalScore:
-      Number.isFinite(Number(payload?.totalScore)) ? Number(payload.totalScore) : score,
-    totalHint,
-    ai,
-    status: 'training_completed',
+    score: isDiagnostic ? '' : score,
+    total: isDiagnostic ? '' : totalRaw,
+    totalScore: isDiagnostic ? '' : Number.isFinite(Number(payload?.totalScore)) ? Number(payload.totalScore) : score,
+    fail_count: isDiagnostic ? '' : failRaw,
+    failCount: isDiagnostic ? '' : failRaw,
+    totalHint: isDiagnostic ? '' : totalHint,
+    ai: isDiagnostic ? (payload?.ai ?? '').toString() : ai,
+    status: isDiagnostic
+      ? SHEET_STATUS.DIAGNOSTIC
+      : statusRaw || resolveTrainingSaveStatus(payload?.type ?? payload?.유형, failRaw),
   }
 }
 
@@ -147,24 +184,11 @@ function parseProblemCode(raw) {
 }
 
 function normalizeStatus(raw) {
-  const text = (raw ?? '').toString().trim()
-  if (!text) return ''
-  if (text === 'diagnostic_completed' || text === '진단완료') return 'diagnostic_completed'
-  if (text === 'training_completed' || text === '수련완료' || text === 'completed') return 'training_completed'
-  if (text === 'in_progress') return 'in_progress'
-  return text
+  return resolveRecordSheetStatus({ status: raw })
 }
 
 export function readRecordStatus(record) {
-  return normalizeStatus(
-    record?.status ??
-      record?.상태 ??
-      record?.P ??
-      record?.p ??
-      record?.['P열'] ??
-      record?.['status(P)'] ??
-      ''
-  )
+  return resolveRecordSheetStatus(record)
 }
 
 function toTimestampMs(record, fallbackIndex = 0) {
@@ -268,6 +292,13 @@ function getDefaultProgress() {
     type: '',
     hasTrainingCompletion: false,
     total: 0,
+    trainingProblemProgressByCode: {},
+    trainingProgressMapByProblem: {},
+    successProblemCodes: [],
+    completedProblemCodes: [],
+    completedProblems: [],
+    failedProblems: [],
+    failedRecords: [],
   }
 }
 
@@ -312,10 +343,17 @@ function hasNumericDiagnosticScore(raw) {
 
 function parseProgressFromData(data, learnerFilter = null) {
   console.log('[student-progress] parsed data', data)
-  let records = flattenRecords(data).map((record, idx) => ({
+  let baseRecords = []
+  if (Array.isArray(data?.records) && data.records.length > 0) {
+    baseRecords = finalizeAdminHistoryRecords(data.records)
+  } else {
+    baseRecords = flattenRecords(data)
+  }
+
+  let records = baseRecords.map((record, idx) => ({
     ...record,
     __status: readRecordStatus(record),
-    __timestamp: toTimestampMs(record, idx),
+    __timestamp: adminHistoryRowTimeMsForSort(record) || toTimestampMs(record, idx),
   }))
   console.log('[student-progress] flattened record count', records.length)
 
@@ -335,9 +373,30 @@ function parseProgressFromData(data, learnerFilter = null) {
     })
   }
 
-  // 진단 여부는 "진단완료 status 존재 여부"만으로 판단한다.
-  const diagnosticRecords = records.filter((record) => record.__status === 'diagnostic_completed')
-  const trainingRecords = records.filter((record) => record.__status === 'training_completed')
+  const diagnosticRecords = records.filter((record) =>
+    isDiagnosticSheetStatus(record.__status),
+  )
+  const trainingRecords = records.filter(
+    (record) =>
+      record.__status === SHEET_STATUS.SUCCESS || record.__status === SHEET_STATUS.FAIL,
+  )
+  const successProblemCodes = [...collectSuccessProblemCodesFromRecords(trainingRecords)]
+  const failedRecordsFromApi = Array.isArray(data?.failedRecords)
+    ? finalizeAdminHistoryRecords(data.failedRecords)
+    : []
+  let completedProblems = Array.isArray(data?.completedProblems)
+    ? normalizeProblemCodeList(data.completedProblems)
+    : successProblemCodes
+  const completedSet = new Set(completedProblems)
+  let failedProblems
+  if (Array.isArray(data?.failedProblems)) {
+    failedProblems = normalizeProblemCodeList(data.failedProblems)
+  } else if (failedRecordsFromApi.length > 0) {
+    failedProblems = collectFailedProblemCodesFromRecords(failedRecordsFromApi)
+  } else {
+    failedProblems = collectFailedProblemCodesFromRecords(trainingRecords)
+  }
+  failedProblems = failedProblems.filter((code) => !completedSet.has(code))
   const latestTrainingRecord = trainingRecords
     .slice()
     .sort((a, b) => Number(a.__timestamp || 0) - Number(b.__timestamp || 0))
@@ -346,6 +405,13 @@ function parseProgressFromData(data, learnerFilter = null) {
     .slice()
     .sort((a, b) => Number(a.__timestamp || 0) - Number(b.__timestamp || 0))
     .at(-1)
+
+  const trainingProblemProgressByCode = applySheetProblemOutcomeLists(
+    computeTrainingProblemProgressByCode(trainingRecords),
+    completedProblems,
+    failedProblems,
+  )
+  const trainingProgressMapByProblem = computeTrainingProgressMapByProblem(trainingProblemProgressByCode)
 
   console.log('[student-progress] diagnostic/training counts', {
     diagnostic: diagnosticRecords.length,
@@ -409,6 +475,15 @@ function parseProgressFromData(data, learnerFilter = null) {
       : null,
     hasTrainingCompletion: Boolean(latestTrainingRecord),
     total: Number.isFinite(Number(sourceRecord.total)) ? Number(sourceRecord.total) : 0,
+    trainingProblemProgressByCode,
+    trainingProgressMapByProblem,
+    successProblemCodes,
+    completedProblemCodes: completedProblems,
+    completedProblems,
+    failedProblems,
+    failedRecords: failedRecordsFromApi.length
+      ? failedRecordsFromApi
+      : trainingRecords.filter((r) => r.__status === SHEET_STATUS.FAIL),
   }
 }
 
@@ -603,21 +678,6 @@ function fetchAiFeedbackJsonpV3(aiPayload) {
   })
 }
 
-/** GAS·원문에 수학적 핵심이 드러나 있으면 로컬 단계 템플릿으로 덮어쓰지 않음 */
-function feedbackLooksMathGrounded_(text) {
-  const t = String(text || '').replace(/\s+/g, ' ')
-  if (t.length < 14) return false
-  let score = 0
-  if (/10x\s*\+\s*a|10x\+a/i.test(t)) score += 8
-  if (/x\s*\+\s*1|\(\s*x\s*\)|\bx\s*로\s*(두|설정|잡)|미지수/i.test(t)) score += 5
-  if (/\d+\s*x|\([^)]*x[^)]*\)/i.test(t)) score += 4
-  if (/관계식|방정식/.test(t)) score += 5
-  if (/나타낼\s*수|표현해야|표현해|식으로\s*(잘\s*)?표현|상황을\s*식으로/.test(t)) score += 6
-  if (/몇\s*배|\d+\s*배/.test(t)) score += 3
-  if (/합\s*(이|을|은)|차\s*(이|를|은)|자릿수|식으로|미지수/.test(t)) score += 2
-  return score >= 6
-}
-
 export function buildShortCoachingFeedback(rawFeedback, aiPayload) {
   const contextText = String(aiPayload?.problemMeta?.context || '').replace(/\s+/g, ' ').trim()
   const totalScore = Number(aiPayload?.total)
@@ -639,11 +699,13 @@ export function buildShortCoachingFeedback(rawFeedback, aiPayload) {
   const scoreTail = scoreTailByLevel[score] || scoreTailByLevel[0]
 
   const rawTrim = String(rawFeedback || '').replace(/\s+/g, ' ').trim()
-  if (rawTrim && feedbackLooksMathGrounded_(rawTrim)) {
+  // GAS가 준 비어 있지 않은 문장은 유지(예전 수식 휴리스틱은 보리 프롬프트와 맞지 않아 템플릿으로 덮였음).
+  if (rawTrim) {
     const tailRecent = rawTrim.slice(-45)
     const alreadyEndsWithCheer =
-      /도전|화이팅|아자아자|MATH-CARD|해볼까|밀어보자|손안에|마스터/.test(tailRecent) ||
-      rawTrim.includes('🙂')
+      /도전|화이팅|아자아자|MATH-CARD|해볼까|밀어보자|손안에|마스터|보리|최고|대단해|가자|힘내|멋져/.test(
+        tailRecent,
+      ) || rawTrim.includes('🙂')
     const combined = alreadyEndsWithCheer ? rawTrim : `${rawTrim} ${scoreTail}`
     return combined.trim().slice(0, AI_FEEDBACK_STORAGE_MAX_CHARS).trim()
   }
@@ -783,8 +845,7 @@ export async function postGenerateAiFeedback(aiPayload) {
 
 /**
  * 닉네임 + 클래스 코드 기준으로 기존 진단/학습 진행 기록을 조회합니다.
- * Apps Script는 `nickname`, `classCode` 쿼리를 받아 해당 학습자 행만 반환하도록 맞추면 됩니다.
- * (클라이언트에서도 동일 키로 한 번 더 필터링합니다.)
+ * Google Apps Script **Sheet2** 기준 (getTargetSheet_).
  */
 /**
  * 닉네임으로 시트에서 학습자 행을 조회한 뒤, 클래스 코드가 유일하면 반환합니다.
@@ -901,11 +962,33 @@ export async function fetchStudentLearningProgress(nickname, classCode) {
   }
 
   try {
+    let historyPayload = null
+    try {
+      const histRes = await fetchAdminStudentLearningHistory(trimmedNickname, trimmedClass)
+      if (histRes.ok && Array.isArray(histRes.records) && histRes.records.length > 0) {
+        historyPayload = {
+          records: histRes.records,
+          completedProblems: histRes.completedProblems,
+          failedProblems: histRes.failedProblems,
+          failedRecords: histRes.failedRecords,
+        }
+      }
+    } catch (histErr) {
+      console.warn('[student-progress] student_history failed, will try legacy GET', histErr)
+    }
+
+    if (historyPayload) {
+      return parseProgressFromData(historyPayload, {
+        nickname: trimmedNickname,
+        classCode: trimmedClass,
+      })
+    }
+
     const q = new URLSearchParams()
     q.set('nickname', trimmedNickname)
     q.set('classCode', trimmedClass)
     const reqUrl = `${url}?${q.toString()}`
-    console.log('[student-progress] GET request url', reqUrl)
+    console.log('[student-progress] GET request url (legacy)', reqUrl)
     const controller = new AbortController()
     const timeoutId = window.setTimeout(() => controller.abort(), 8000)
     const res = await fetch(reqUrl, { method: 'GET', signal: controller.signal })
@@ -959,6 +1042,17 @@ function mapLegacyRosterToStudentRow(entry) {
       : 0,
     latestStatus: lastStatus || '—',
     lastActivity: String(entry?.lastActivity ?? entry?.timestamp ?? '').trim(),
+    mainSuccessCount: Number.isFinite(Number(entry?.mainSuccessCount))
+      ? Number(entry.mainSuccessCount)
+      : 0,
+    mainFailCount: Number.isFinite(Number(entry?.mainFailCount)) ? Number(entry.mainFailCount) : 0,
+    similarSuccessCount: Number.isFinite(Number(entry?.similarSuccessCount))
+      ? Number(entry.similarSuccessCount)
+      : 0,
+    similarFailCount: Number.isFinite(Number(entry?.similarFailCount))
+      ? Number(entry.similarFailCount)
+      : 0,
+    mathCardCount: Number.isFinite(Number(entry?.mathCardCount)) ? Number(entry.mathCardCount) : 0,
   }
 }
 
@@ -1091,8 +1185,10 @@ export async function fetchClassProblemLearningStats(classCode) {
 
 export function sheetStatusLabelForAdmin(record) {
   const ns = record.__status ?? readRecordStatus(record)
-  if (ns === 'training_completed') return '수련완료'
-  if (ns === 'diagnostic_completed') return '진단완료'
+  if (ns === SHEET_STATUS.SUCCESS) return '성공'
+  if (ns === SHEET_STATUS.FAIL) return '실패'
+  if (ns === 'training_completed' || ns === '수련완료') return '수련완료'
+  if (ns === SHEET_STATUS.DIAGNOSTIC || ns === 'diagnostic_completed') return '진단완료'
   if (ns === 'in_progress') return '진행중'
   const raw = String(record?.status ?? '').trim()
   return raw || '—'
@@ -1112,28 +1208,314 @@ export function formatAdminHistoryTimestamp(record) {
   return s
 }
 
+/** 구글 시트·class_roster 표기: `2026. 5. 17 오후 10:06:08` */
+const ADMIN_KO_SHEET_TIMESTAMP_RE =
+  /^(\d{4})\.\s*(\d{1,2})\.\s*(\d{1,2})\s*(오전|오후)\s*(\d{1,2}):(\d{2}):(\d{2})$/
+
+export function isAdminKoreanSheetTimestampString(value) {
+  return ADMIN_KO_SHEET_TIMESTAMP_RE.test(String(value ?? '').trim())
+}
+
+/**
+ * 시트/API timestamp → epoch ms (숫자 ms·초, ISO, 한국어 표기 문자열).
+ * `Date.parse('1777204843000')` 는 NaN 이므로 숫자 문자열은 별도 처리합니다.
+ */
+export function coerceAdminTimestampToMs(value) {
+  if (value === undefined || value === null || value === '') return NaN
+  if (value instanceof Date && !Number.isNaN(value.getTime())) return value.getTime()
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    if (value >= 1e12) return value
+    if (value >= 1e9) return value * 1000
+    // Google Sheets 날짜 직렬값(일 단위)
+    if (value > 20000 && value < 120000) {
+      return Math.round((value - 25569) * 86400 * 1000)
+    }
+    return NaN
+  }
+  const s = String(value).trim()
+  if (!s) return NaN
+  if (/^\d{10,13}$/.test(s)) {
+    const n = Number(s)
+    if (Number.isFinite(n)) {
+      if (n >= 1e12) return n
+      if (n >= 1e9) return n * 1000
+    }
+  }
+  const serial = Number(s)
+  if (Number.isFinite(serial) && serial > 20000 && serial < 120000) {
+    return Math.round((serial - 25569) * 86400 * 1000)
+  }
+  const km = s.match(ADMIN_KO_SHEET_TIMESTAMP_RE)
+  if (km) {
+    const y = Number(km[1])
+    const mo = Number(km[2]) - 1
+    const d = Number(km[3])
+    let h = Number(km[5])
+    const min = Number(km[6])
+    const sec = Number(km[7])
+    if (km[4] === '오후' && h < 12) h += 12
+    if (km[4] === '오전' && h === 12) h = 0
+    return Date.UTC(y, mo, d, h - 9, min, sec)
+  }
+  const parsed = Date.parse(s)
+  return Number.isFinite(parsed) ? parsed : NaN
+}
+
 /**
  * 관리자 화면 전용: 구글 시트와 동일한 한국 시간 표기
  * `yyyy. M. d 오전/오후 h:mm:ss` (예: 2026. 4. 28 오후 12:26:30)
  */
 export function formatAdminSeoulSheetTimestamp(value) {
   if (value === undefined || value === null || value === '') return '—'
-  if (value instanceof Date && !Number.isNaN(value.getTime())) {
-    return formatAdminSeoulSheetTimestampFromDate_(value)
-  }
   const s = String(value).trim()
-  if (!s) return '—'
-  const ms = Date.parse(s)
+  if (isAdminKoreanSheetTimestampString(s)) return s
+  const ms = coerceAdminTimestampToMs(value)
   if (Number.isFinite(ms)) {
     return formatAdminSeoulSheetTimestampFromDate_(new Date(ms))
   }
-  return s
+  return s || '—'
 }
 
-/** 목록용: 한 레코드에서 표시할 대표 시각 (H timestamp 우선) */
+function pickRecordField(record, key) {
+  const field = record?.[key]
+  if (field === undefined || field === null) return ''
+  if (field instanceof Date && !Number.isNaN(field.getTime())) return field
+  const s = String(field).trim()
+  return s || ''
+}
+
+function formatAdminHistoryTimestampCellValue(value) {
+  if (value === undefined || value === null || String(value).trim() === '') return '—'
+  const formatted = formatAdminSeoulSheetTimestamp(value)
+  if (formatted !== '—' && String(formatted).trim() !== '') return formatted
+  const s = String(value).trim()
+  return s || '—'
+}
+
+/**
+ * 전체 학습 이력 테이블 timestamp 열
+ * - 수련: record.timestamp 만
+ * - 진단: record.diag_time || record.timestamp
+ */
+export function formatAdminHistoryTableTimestamp(record) {
+  const diagnostic =
+    isDiagnosticSheetStatus(readRecordStatus(record)) ||
+    String(record?.type ?? '').trim() === '진단평가'
+  if (diagnostic) {
+    const v = pickRecordField(record, 'diag_time') || pickRecordField(record, 'timestamp')
+    return formatAdminHistoryTimestampCellValue(v)
+  }
+  return formatAdminHistoryTimestampCellValue(pickRecordField(record, 'timestamp'))
+}
+
+/** student_history 응답에 timestamp가 실제로 오는지 개발자 도구에서 확인용 */
+export function logAdminHistoryTimestampInspection(records, label) {
+  const list = Array.isArray(records) ? records : []
+  const trainingMissing = list.filter((r) => {
+    const st = String(r?.status ?? '').trim()
+    if (st === '진단완료' || st === 'diagnostic_completed') return false
+    return !pickRecordField(r, 'timestamp')
+  }).length
+  console.log(`[admin history] timestamp inspection (${label})`, {
+    total: list.length,
+    trainingRowsMissingTimestamp: trainingMissing,
+  })
+  try {
+    console.log(
+      `[admin history] records sample JSON (${label}):\n${JSON.stringify(list.slice(0, 3), null, 2)}`,
+    )
+  } catch (err) {
+    console.warn(`[admin history] records sample JSON failed (${label})`, err)
+  }
+}
+
+function looksLikeLearningRecord(row) {
+  if (!row || typeof row !== 'object' || Array.isArray(row)) return false
+  return Boolean(
+    row.nickname ||
+      row.problem ||
+      row.status ||
+      row.type ||
+      row.diag_score !== undefined ||
+      row.diag_time,
+  )
+}
+
+/** `{ "0": row, "1": row }` 처럼 배열이 객체로 직렬화된 경우 */
+function coerceNumericKeyedRecordsArray(value) {
+  if (Array.isArray(value)) return value.length ? value : null
+  if (!value || typeof value !== 'object') return null
+  const keys = Object.keys(value)
+  if (!keys.length || !keys.every((k) => /^\d+$/.test(k))) return null
+  const rows = keys
+    .sort((a, b) => Number(a) - Number(b))
+    .map((k) => value[k])
+    .filter((x) => x != null && typeof x === 'object')
+  return rows.length ? rows : null
+}
+
+function parseMaybeJsonRecordsArray(value) {
+  if (Array.isArray(value)) return value.length ? value : null
+  if (typeof value === 'string') {
+    const t = value.trim()
+    if (!t.startsWith('[') && !t.startsWith('{')) return null
+    try {
+      const parsed = JSON.parse(t)
+      if (Array.isArray(parsed) && parsed.length) return parsed
+      return coerceNumericKeyedRecordsArray(parsed)
+    } catch (_) {
+      return null
+    }
+  }
+  return coerceNumericKeyedRecordsArray(value)
+}
+
+function inferAdminHistoryTimestampFromRaw(raw) {
+  const direct = raw?.timestamp ?? raw?.Timestamp
+  if (direct !== undefined && direct !== null && String(direct).trim() !== '') {
+    return direct
+  }
+  for (const key of ['completedAt', 'completionDate', 'updatedAt', 'createdAt']) {
+    const v = raw?.[key]
+    if (v !== undefined && v !== null && String(v).trim() !== '') return v
+  }
+  return ''
+}
+
+/** action=student_history 1차 응답 구조 진단 */
+function logStudentHistoryApiShape(data, label, rawText = '') {
+  const top = Array.isArray(data) ? 'array' : typeof data
+  const keys = data && typeof data === 'object' && !Array.isArray(data) ? Object.keys(data) : []
+  const dataFieldType =
+    data?.data == null ? 'missing' : Array.isArray(data.data) ? 'array' : typeof data.data
+  console.log(`[admin history] API shape (${label})`, {
+    topLevelType: top,
+    keys,
+    keyList: keys.join(','),
+    rawTextHead: (rawText || '').slice(0, 280),
+    result: data?.result,
+    ok: data?.ok,
+    recordsIsArray: Array.isArray(data?.records),
+    recordsLength: Array.isArray(data?.records) ? data.records.length : null,
+    dataFieldType,
+    dataLength: Array.isArray(data?.data) ? data.data.length : null,
+    nestedDataRecordsIsArray: Array.isArray(data?.data?.records),
+  })
+  try {
+    const sample = Array.isArray(data)
+      ? data.slice(0, 2)
+      : {
+          result: data?.result,
+          message: data?.message,
+          records: Array.isArray(data?.records) ? data.records.slice(0, 2) : data?.records,
+          data: Array.isArray(data?.data) ? data.data.slice(0, 2) : data?.data,
+        }
+    console.log(`[admin history] API payload sample (${label}):\n${JSON.stringify(sample, null, 2)}`)
+  } catch (err) {
+    console.warn(`[admin history] API payload sample failed (${label})`, err)
+  }
+}
+
+/**
+ * student_history(또는 동일 URL) JSON에서 records 배열 추출.
+ * @returns {{
+ *   records: object[] | null,
+ *   source: string,
+ *   isError?: boolean,
+ *   errorMessage?: string,
+ *   meta?: object,
+ * }}
+ */
+function extractStudentHistoryRecordsFromApi(data) {
+  if (Array.isArray(data)) {
+    if (data.length && looksLikeLearningRecord(data[0])) {
+      return { records: data, source: 'top-level-array', meta: null }
+    }
+    return { records: null, source: 'top-level-array-empty', meta: null }
+  }
+  if (!data || typeof data !== 'object') {
+    return { records: null, source: 'invalid-payload' }
+  }
+
+  const result = String(data.result ?? data.Result ?? '').trim().toLowerCase()
+  if (result === 'error') {
+    return {
+      records: null,
+      source: 'api-error',
+      isError: true,
+      errorMessage: String(data.message ?? data.error ?? 'student_history 조회 실패'),
+      meta: data,
+    }
+  }
+
+  const tryField = (fieldName) => {
+    const arr = parseMaybeJsonRecordsArray(data[fieldName])
+    if (arr?.length && looksLikeLearningRecord(arr[0])) {
+      return { records: arr, source: fieldName, meta: data }
+    }
+    return null
+  }
+
+  for (const field of ['records', 'data', 'rows', 'history']) {
+    const hit = tryField(field)
+    if (hit) return hit
+  }
+
+  const inner = data.data
+  if (inner && typeof inner === 'object' && !Array.isArray(inner) && Array.isArray(inner.records)) {
+    return { records: inner.records, source: 'data.records', meta: data }
+  }
+
+  if (data.records && typeof data.records === 'object' && !Array.isArray(data.records)) {
+    const coerced = coerceNumericKeyedRecordsArray(data.records)
+    if (coerced?.length && looksLikeLearningRecord(coerced[0])) {
+      return { records: coerced, source: 'records-numeric-keys', meta: data }
+    }
+    const values = Object.values(data.records).filter((x) => x && typeof x === 'object')
+    if (values.length > 0 && looksLikeLearningRecord(values[0])) {
+      return { records: values, source: 'records-object-values', meta: data }
+    }
+  }
+
+  const rootCoerced = coerceNumericKeyedRecordsArray(data)
+  if (rootCoerced?.length && looksLikeLearningRecord(rootCoerced[0])) {
+    return { records: rootCoerced, source: 'numeric-keys-root', meta: data }
+  }
+
+  for (const k of Object.keys(data)) {
+    const arr = parseMaybeJsonRecordsArray(data[k])
+    if (arr?.length && looksLikeLearningRecord(arr[0])) {
+      return { records: arr, source: `field:${k}`, meta: data }
+    }
+  }
+
+  return { records: null, source: 'unrecognized', meta: data }
+}
+
+function buildAdminHistoryFetchResult(records, meta, sourceLabel) {
+  return {
+    ok: true,
+    records,
+    historySource: sourceLabel,
+    completedProblems: Array.isArray(meta?.completedProblems) ? meta.completedProblems : undefined,
+    failedProblems: Array.isArray(meta?.failedProblems) ? meta.failedProblems : undefined,
+    failedRecords: Array.isArray(meta?.failedRecords) ? meta.failedRecords : undefined,
+  }
+}
+
+/** 목록용: 한 레코드에서 표시할 대표 시각 */
 export function formatAdminSeoulSheetTimestampFromRecord(record) {
-  const v = record?.timestamp ?? record?.completionDate ?? record?.completedAt ?? record?.diag_time
-  return formatAdminSeoulSheetTimestamp(v)
+  return formatAdminHistoryTableTimestamp(record)
+}
+
+/** 관리자 학습 이력 테이블: total / fail_count 등 숫자 셀 */
+export function formatAdminHistoryNumericCell(value) {
+  if (value === '' || value === null || value === undefined) return '—'
+  if (typeof value === 'number' && Number.isFinite(value)) return String(value)
+  const s = String(value).trim()
+  if (!s) return '—'
+  const n = Number(s)
+  return Number.isFinite(n) ? String(n) : s
 }
 
 function formatAdminSeoulSheetTimestampFromDate_(d) {
@@ -1167,9 +1549,18 @@ function formatAdminSeoulSheetTimestampFromDate_(d) {
   return `${year}. ${month}. ${day} ${dayPeriod} ${hour}:${minute}:${second}`.replace(/\s+/g, ' ').trim()
 }
 
-/** 관리자 API/시트: step1~6 은 0(실패)이 유효 — hasOwnProperty + 0 보존 */
+/** 관리자 API/시트: step 슬롯은 0(실패)이 유효 — hasOwnProperty + 0 보존 */
 function adminNormalizeStepFromRaw(raw, i) {
-  const keys = ['step1', 'step2', 'step3', 'step4', 'step5', 'step6']
+  const keys = [
+    'step1',
+    'step2',
+    'step3',
+    'step4',
+    'step5_1',
+    'step5_2',
+    'step5_3',
+    'step6',
+  ]
   const k = keys[i]
   if (raw && typeof raw === 'object' && Object.prototype.hasOwnProperty.call(raw, k)) {
     const d = raw[k]
@@ -1197,6 +1588,12 @@ function normalizeAdminHistoryRecordShape(raw) {
   const scores = Array.isArray(raw?.scores) ? raw.scores : []
   const hintRaw = adminNormalizeHintFromRaw(raw)
   const sr = Number(raw?.sheetRow)
+  const tsRaw = inferAdminHistoryTimestampFromRaw(raw)
+  const ts =
+    tsRaw !== undefined && tsRaw !== null && String(tsRaw).trim() !== '' ? tsRaw : ''
+  const diagRaw = raw?.diag_time ?? raw?.diagTime
+  const diag =
+    diagRaw !== undefined && diagRaw !== null && String(diagRaw).trim() !== '' ? diagRaw : ''
   return {
     ...raw,
     nickname: String(raw?.nickname ?? '').trim(),
@@ -1205,6 +1602,10 @@ function normalizeAdminHistoryRecordShape(raw) {
     type: String(raw?.type ?? '').trim(),
     level: String(raw?.level ?? '').trim(),
     total: raw?.total,
+    fail_count: raw?.fail_count ?? raw?.failCount ?? '',
+    failCount: raw?.fail_count ?? raw?.failCount ?? '',
+    timestamp: ts,
+    diag_time: diag,
     hint: hintRaw,
     status: String(raw?.status ?? '').trim(),
     ai: String(raw?.ai ?? '').trim(),
@@ -1212,38 +1613,44 @@ function normalizeAdminHistoryRecordShape(raw) {
     step2: adminNormalizeStepFromRaw(raw, 1),
     step3: adminNormalizeStepFromRaw(raw, 2),
     step4: adminNormalizeStepFromRaw(raw, 3),
+    step5_1: adminNormalizeStepFromRaw(raw, 4),
+    step5_2: adminNormalizeStepFromRaw(raw, 5),
+    step5_3: adminNormalizeStepFromRaw(raw, 6),
+    step6: adminNormalizeStepFromRaw(raw, 7),
     step5: adminNormalizeStepFromRaw(raw, 4),
-    step6: adminNormalizeStepFromRaw(raw, 5),
-    scores,
+    scores:
+      Array.isArray(raw?.scores) && raw.scores.length >= 8
+        ? raw.scores
+        : [
+            adminNormalizeStepFromRaw(raw, 0),
+            adminNormalizeStepFromRaw(raw, 1),
+            adminNormalizeStepFromRaw(raw, 2),
+            adminNormalizeStepFromRaw(raw, 3),
+            adminNormalizeStepFromRaw(raw, 4),
+            adminNormalizeStepFromRaw(raw, 5),
+            adminNormalizeStepFromRaw(raw, 6),
+            adminNormalizeStepFromRaw(raw, 7),
+          ],
     sheetRow: Number.isFinite(sr) ? sr : undefined,
   }
 }
 
-/** Apps Script `adminHistoryRowTimeMs_` 와 동일한 기준 (클라이언트 재정렬용) */
-function adminHistoryRowTimeMsForSort(rec) {
-  const t = rec?.timestamp
-  if (t instanceof Date && !Number.isNaN(t.getTime())) return t.getTime()
-  const e = rec?.diag_time
-  if (e instanceof Date && !Number.isNaN(e.getTime())) return e.getTime()
-  const s = String(t ?? '').trim()
-  if (s) {
-    const p = Date.parse(s)
-    if (Number.isFinite(p)) return p
+/** Apps Script `adminHistoryRowTimeMs_` / `activityMsForRecord_` 와 동일한 기준 */
+export function adminHistoryRowTimeMsForSort(rec) {
+  let best = 0
+  for (const field of [rec?.timestamp, rec?.diag_time]) {
+    const ms = coerceAdminTimestampToMs(field)
+    if (Number.isFinite(ms) && ms > best) best = ms
   }
-  const s2 = String(e ?? '').trim()
-  if (s2) {
-    const p2 = Date.parse(s2)
-    if (Number.isFinite(p2)) return p2
-  }
-  return 0
+  return best
 }
 
 function sortAdminHistoryRecordsInPlace(records) {
   records.sort((a, b) => {
     const ta = adminHistoryRowTimeMsForSort(a)
     const tb = adminHistoryRowTimeMsForSort(b)
-    if (ta !== tb) return ta - tb
-    return (Number(a.sheetRow) || 0) - (Number(b.sheetRow) || 0)
+    if (ta !== tb) return tb - ta
+    return (Number(b.sheetRow) || 0) - (Number(a.sheetRow) || 0)
   })
 }
 
@@ -1251,7 +1658,6 @@ function finalizeAdminHistoryRecords(rawList) {
   const records = rawList.map((r) => normalizeAdminHistoryRecordShape(r))
   sortAdminHistoryRecordsInPlace(records)
   console.log('[admin history] records count:', records.length)
-  console.log('[admin history] raw records:', rawList)
   return records
 }
 
@@ -1287,24 +1693,35 @@ export async function fetchAdminStudentLearningHistory(nickname, classCode) {
     }
     const rawText = await res.text()
     const data = parseJsonLoose(rawText)
-    console.log('[admin history] response:', data)
+    logStudentHistoryApiShape(data, 'student_history primary', rawText)
 
-    if (String(data?.result || '').toLowerCase() === 'error') {
+    const primary = extractStudentHistoryRecordsFromApi(data)
+    if (primary.isError) {
       return {
         ok: false,
         reason: 'student_history_api',
-        message: String(data?.message || 'student_history 조회 실패'),
+        message: primary.errorMessage || 'student_history 조회 실패',
         records: [],
       }
     }
 
-    // `student_history`는 `records`에 전체 행을 담습니다. `data`만 있는 레거시 응답보다 항상 우선합니다.
-    if (Array.isArray(data?.records)) {
-      return { ok: true, records: finalizeAdminHistoryRecords(data.records) }
+    if (primary.records) {
+      console.log(
+        `[admin history] using primary response (source=${primary.source}, count=${primary.records.length})`,
+      )
+      logAdminHistoryTimestampInspection(primary.records, `primary:${primary.source} (before normalize)`)
+      const records = finalizeAdminHistoryRecords(primary.records)
+      logAdminHistoryTimestampInspection(records, `primary:${primary.source} (after normalize)`)
+      return buildAdminHistoryFetchResult(records, primary.meta, `student_history:${primary.source}`)
     }
-    if (Array.isArray(data?.data)) {
-      return { ok: true, records: finalizeAdminHistoryRecords(data.data) }
-    }
+
+    console.warn(
+      '[admin history] primary student_history had no records array; unrecognized shape — trying legacy fallback',
+      {
+        source: primary.source,
+        keys: data && typeof data === 'object' ? Object.keys(data) : [],
+      },
+    )
 
     const q2 = new URLSearchParams()
     q2.set('nickname', nick)
@@ -1320,17 +1737,35 @@ export async function fetchAdminStudentLearningHistory(nickname, classCode) {
     }
     const raw2 = await res2.text()
     const data2 = parseJsonLoose(raw2)
-    console.log('[admin history] fallback response:', data2)
-    let rawRecords = []
-    if (Array.isArray(data2?.data)) {
-      rawRecords = data2.data
-    } else {
+    logStudentHistoryApiShape(data2, 'legacy fallback (nickname+classCode)', raw2)
+
+    const fallback = extractStudentHistoryRecordsFromApi(data2)
+    let rawRecords = fallback.records
+    if (!rawRecords) {
       rawRecords = flattenRecords(data2).filter((r) =>
         recordMatchesLearner(r, nick, cc, { classOptional: false }),
       )
     }
+    if (!rawRecords?.length) {
+      return {
+        ok: false,
+        reason: 'student_history_empty',
+        message: '학습 기록을 찾을 수 없습니다.',
+        records: [],
+      }
+    }
+
+    console.log(
+      `[admin history] using fallback (source=${fallback.source || 'flatten'}, count=${rawRecords.length})`,
+    )
+    logAdminHistoryTimestampInspection(rawRecords, 'fallback (before normalize)')
     const records = finalizeAdminHistoryRecords(rawRecords)
-    return { ok: true, records }
+    logAdminHistoryTimestampInspection(records, 'fallback (after normalize)')
+    return buildAdminHistoryFetchResult(
+      records,
+      fallback.meta ?? data2,
+      `fallback:${fallback.source || 'flatten'}`,
+    )
   } catch (error) {
     console.error('[Sheets] fetchAdminStudentLearningHistory:error', error)
     return {
@@ -1537,6 +1972,73 @@ export async function createTeacherClass(teacherEmail, classCode, className) {
         error?.message ||
         '네트워크 오류(개발환경에서는 VITE_API_PROXY=/api/gas 프록시 설정 확인 필요)',
     }
+  }
+}
+
+/**
+ * 관리자: POST action=update_class
+ * payload: { teacherEmail, classCode, className }
+ */
+export async function updateTeacherClass(teacherEmail, classCode, className) {
+  const url = resolveAiFeedbackPostUrl()
+  const email = normalizeTeacherEmailForCompare(teacherEmail)
+  const code = normalizeClassCode(classCode)
+  const name = String(className || '').trim()
+
+  if (!url) return { ok: false, reason: 'missing_api_url', message: '' }
+  if (!email || !code || !name) {
+    return { ok: false, reason: 'missing_params', message: 'teacherEmail, classCode, className이 필요합니다.' }
+  }
+
+  try {
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        action: 'update_class',
+        teacherEmail: email,
+        classCode: code,
+        className: name,
+      }),
+    })
+    const raw = await res.text()
+    const data = parseJsonLoose(raw)
+    console.log('[admin] update_class response', { status: res.status, data })
+    const result = String(data?.result || '').toLowerCase()
+
+    if (res.ok && data?.ok === true && !result) {
+      return {
+        ok: false,
+        reason: 'deploy_missing_update_class',
+        message:
+          '서버가 이름 변경을 처리하지 못했습니다. Apps Script에 최신 Code.gs(update_class 포함)를 붙여넣고 「새 버전」으로 배포해 주세요.',
+      }
+    }
+
+    if (res.ok && result === 'success') {
+      return {
+        ok: true,
+        class: data?.class || null,
+        message: String(data?.message || ''),
+      }
+    }
+
+    const apiMessage = String(data?.message || data?.error || '').trim()
+    if (result === 'not_found') {
+      return {
+        ok: false,
+        reason: 'not_found',
+        message: apiMessage || '해당 클래스를 찾지 못했습니다.',
+      }
+    }
+
+    return {
+      ok: false,
+      reason: result || `http_${res.status}`,
+      message: apiMessage || '클래스 이름 변경에 실패했습니다.',
+    }
+  } catch (error) {
+    return { ok: false, reason: 'network_error', message: error?.message || '' }
   }
 }
 

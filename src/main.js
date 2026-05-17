@@ -93,9 +93,12 @@ function toSheetRowPayload(payload = {}) {
     scores: [],
     score: diagnosticScoreSafe,
     totalScore: diagnosticScoreSafe,
+    total: '',
+    fail_count: '',
+    failCount: '',
     totalHint: '',
     ai: '',
-    status: 'diagnostic_completed',
+    status: '진단완료',
   }
 }
 
@@ -114,7 +117,7 @@ async function saveDataToSheets(payload) {
     return { ok: false, reason: 'missing_api_url' }
   }
   try {
-    if (normalizedPayload?.status === 'diagnostic_completed') {
+    if (normalizedPayload?.status === '진단완료') {
       const diagnosticScore = payload?.diag_score
       console.log('[diagnostic] raw score:', diagnosticScore)
       console.log('[diagnostic] saved score:', normalizedPayload.diag_score)
@@ -184,15 +187,15 @@ function renderWelcome() {
           <div class="mm-mini-title">학습 안내</div>
           <div class="mm-mini-items">
             <div class="mm-mini-item">1) 5문항으로 현재 수준을 확인해요.</div>
-            <div class="mm-mini-item">2) 수준에 맞게 연습문제를 드려요.</div>
-            <div class="mm-mini-item">3) 답을 체크하고 격려 또는 피드백을 받습니다.</div>
+            <div class="mm-mini-item">2) 결과에 따라 나에게 맞는 수련 단계가 정해져요.</div>
+            <div class="mm-mini-item">3) 진단 결과를 바탕으로 맞춤 수련을 시작해요.</div>
           </div>
         </div>
       </section>
     </main>
 
     <footer class="mm-footer">
-      <a class="mm-link" href="#" id="mm-privacy-link">개인정보 보호 안내</a>
+      <p class="mm-footer-note">개인정보 보호 안내</p>
     </footer>
   </div>
   `
@@ -205,10 +208,6 @@ function renderWelcome() {
     location.hash = `#level-check${q}`
   })
 
-  app.querySelector('#mm-privacy-link')?.addEventListener('click', (e) => {
-    e.preventDefault()
-    alert('개인정보 보호 안내는 다음 단계에서 상세 화면으로 연결하겠습니다.')
-  })
 }
 
 function renderLevelCheckPlaceholder(problemIdx = 0) {
@@ -588,7 +587,7 @@ function renderLevelCheckPlaceholder(problemIdx = 0) {
       level: diagnosticLevel,
       diag_score: Number.isFinite(diagnosticScore) ? diagnosticScore : 0,
       diag_time: new Date().toISOString(),
-      status: 'diagnostic_completed',
+      status: '진단완료',
     }
     try {
       const cacheNickname = (diagnosticPayload.nickname || '').trim()
@@ -602,7 +601,7 @@ function renderLevelCheckPlaceholder(problemIdx = 0) {
             classCode: cacheClass,
             tier: tierLevel,
             level: diagnosticLevel,
-            status: 'diagnostic_completed',
+            status: '진단완료',
             diag_score: diagnosticScore,
             diag_time: diagnosticPayload.diag_time,
           })

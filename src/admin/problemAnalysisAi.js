@@ -1,7 +1,14 @@
 /**
- * 관리자 대시보드 — 문제별 학습 통계 기반 AI 분석(추후 OpenAI 연동).
- * 현재는 payload 구조만 정의하고, 호출 시 콘솔 로그만 출력합니다.
+ * 관리자 대시보드 — 문제별 학습 통계 기반 분석.
+ * Apps Script `admin_problem_analysis` 성공 시 AI JSON, 실패 시 createProblemAnalysisDraft 폴백.
  */
+
+import {
+  ADMIN_PROBLEM_ANALYSIS_ACTION,
+  ADMIN_PROBLEM_ANALYSIS_PAYLOAD_VERSION,
+  extractAnalysisFromAppsScriptResponse,
+} from './problemAnalysisContract.js'
+import { resolveGasWebhookPostUrl } from '../sheets.js'
 
 /**
  * @param {string} classCode
@@ -82,15 +89,58 @@ export function buildProblemAnalysisAiPayload(classCode, selectedProblem, statsR
 }
 
 /**
- * 추후 OpenAI 등으로 문제 단위 집계 분석을 요청할 때 사용.
- * 현재: payload만 콘솔에 출력합니다.
+ * Web App POST — Apps Script 3단계에서 `action: admin_problem_analysis` 처리 시 성공.
  *
  * @param {ReturnType<typeof buildProblemAnalysisAiPayload>} payload
- * @returns {Promise<null>}
+ * @returns {Promise<{ ok: boolean, analysis?: object, reason?: string }>}
  */
 export async function generateProblemAnalysisFeedback(payload) {
-  console.log('[AI problem payload]', payload)
-  return null
+  const url = resolveGasWebhookPostUrl()
+  if (!url) {
+    console.warn('[admin problem AI] missing VITE_API_URL')
+    return { ok: false, reason: 'missing_api_url' }
+  }
+  try {
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        action: ADMIN_PROBLEM_ANALYSIS_ACTION,
+        v: ADMIN_PROBLEM_ANALYSIS_PAYLOAD_VERSION,
+        data: payload,
+      }),
+    })
+    const rawText = await res.text()
+    let parsed = null
+    try {
+      parsed = JSON.parse(rawText)
+    } catch {
+      parsed = null
+    }
+    const analysis = extractAnalysisFromAppsScriptResponse(parsed)
+    if (analysis) {
+      return { ok: true, analysis }
+    }
+    console.warn('[admin problem AI] unexpected response', res.status, String(rawText || '').slice(0, 400))
+    return { ok: false, reason: 'bad_response' }
+  } catch (err) {
+    console.warn('[admin problem AI]', err)
+    return { ok: false, reason: 'network_error' }
+  }
+}
+
+/**
+ * API 우선, 실패·미구현 시 통계 초안.
+ *
+ * @param {ReturnType<typeof buildProblemAnalysisAiPayload>} payload
+ * @returns {Promise<{ source: 'api' | 'stats', sections: ReturnType<typeof createProblemAnalysisDraft> }>}
+ */
+export async function fetchProblemAnalysisWithFallback(payload) {
+  const apiRes = await generateProblemAnalysisFeedback(payload)
+  if (apiRes.ok && apiRes.analysis) {
+    return { source: 'api', sections: apiRes.analysis }
+  }
+  return { source: 'stats', sections: createProblemAnalysisDraft(payload) }
 }
 
 /**

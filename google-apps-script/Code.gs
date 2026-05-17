@@ -57,6 +57,52 @@ function doPost(e) {
       });
     }
   }
+  if (data.action === 'update_class') {
+    try {
+      return jsonResponse(handleUpdateClassPost_(data));
+    } catch (err5) {
+      Logger.log('update_class: ' + err5);
+      return jsonResponse({
+        result: 'error',
+        message: String(err5 && err5.message ? err5.message : err5),
+      });
+    }
+  }
+  if (String(data.action || '').trim() === 'admin_problem_analysis') {
+    try {
+      var paResult = generateAdminProblemAnalysis_(data.data || {});
+      if (paResult.ok && paResult.analysis) {
+        return jsonResponse({
+          result: 'success',
+          ok: true,
+          analysis: paResult.analysis,
+        });
+      }
+      return jsonResponse({
+        ok: false,
+        result: 'error',
+        message: paResult.message || 'admin_problem_analysis_failed',
+      });
+    } catch (errPa) {
+      Logger.log('admin_problem_analysis: ' + errPa);
+      return jsonResponse({
+        ok: false,
+        result: 'error',
+        message: String(errPa && errPa.message ? errPa.message : errPa),
+      });
+    }
+  }
+
+  var actionStr = String(data.action || '').trim();
+  if (actionStr) {
+    return jsonResponse({
+      result: 'error',
+      message:
+        '요청을 처리할 수 없습니다. Code.gs를 최신으로 저장한 뒤 웹앱을 「새 버전」으로 배포해 주세요. (action: ' +
+        actionStr +
+        ')',
+    });
+  }
 
   Logger.log(data);
   var diagScore =
@@ -93,7 +139,7 @@ function jsonResponse(obj) {
  *    → 해당 닉네임 행의 classCode 집합으로 resolvedClassCode / multipleClassCodes / found 반환
  * 2) ?nickname=&classCode=
  *    → 해당 학습자 행만 모아 { data: [...] } (프론트 parseProgressFromData 호환)
- * 3) ?action=class_roster&classCode=  → Sheet1에서 classCode 일치 행만, nickname별 집계 → { result, students }
+ * 3) ?action=class_roster&classCode=  → Sheet2에서 classCode 일치 행만, nickname별 집계 → { result, students }
  * 4) ?action=class_info&classCode=
  * 5) ?action=student_history&nickname=&classCode=  → 해당 학습자 **전체 시트 행** (step1~6 포함)
  * 6) ?action=class_problem_stats&classCode= → 수련완료 행만, 문제(F)×유형(G) 통계 + problems[] + records[]
@@ -163,57 +209,257 @@ function doGet(e) {
   }
 }
 
+/** Sheet2 1행 헤더 → 열 인덱스 (H timestamp = 7 기본) */
+function getDefaultLearnerColMap_() {
+  return {
+    nickname: 0,
+    classCode: 1,
+    level: 2,
+    diag_score: 3,
+    diag_time: 4,
+    problem: 5,
+    type: 6,
+    timestamp: 7,
+    step1: 8,
+    step2: 9,
+    step3: 10,
+    step4: 11,
+    step5_1: 12,
+    step5_2: 13,
+    step5_3: 14,
+    step6: 15,
+    total: 16,
+    hint: 17,
+    status: 18,
+    ai: 19,
+    fail_count: 20,
+  };
+}
+
+function normalizeSheetHeaderKey_(h) {
+  return String(h || '')
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, '')
+    .replace(/_/g, '');
+}
+
+/**
+ * 1행 헤더에서 timestamp·diag_time 등 열 위치 해석 (없으면 기본 A~U 매핑).
+ * @param {Array} headerRow
+ */
+function getLearnerSheetColumnMap_(headerRow) {
+  var map = getDefaultLearnerColMap_();
+  if (!headerRow || !headerRow.length) {
+    return map;
+  }
+  for (var c = 0; c < headerRow.length; c++) {
+    var key = normalizeSheetHeaderKey_(headerRow[c]);
+    if (!key) continue;
+    if (key === 'nickname' || key === '닉네임') map.nickname = c;
+    else if (key === 'classcode' || key === '클래스코드') map.classCode = c;
+    else if (key === 'level' || key === '레벨') map.level = c;
+    else if (key === 'diagscore' || key === '진단점수') map.diag_score = c;
+    else if (key === 'diagtime' || key === '진단시간') map.diag_time = c;
+    else if (key === 'problem' || key === '문제' || key === '문항') map.problem = c;
+    else if (key === 'type' || key === '유형') map.type = c;
+    else if (key === 'timestamp' || key === '시간' || key === '기록시각') map.timestamp = c;
+    else if (key === 'step1') map.step1 = c;
+    else if (key === 'step2') map.step2 = c;
+    else if (key === 'step3') map.step3 = c;
+    else if (key === 'step4') map.step4 = c;
+    else if (key === 'step51' || key === 'step5_1' || key === 'step5') map.step5_1 = c;
+    else if (key === 'step52' || key === 'step5_2') map.step5_2 = c;
+    else if (key === 'step53' || key === 'step5_3') map.step5_3 = c;
+    else if (key === 'step6') map.step6 = c;
+    else if (key === 'total' || key === '점수') map.total = c;
+    else if (key === 'hint' || key === '힌트') map.hint = c;
+    else if (key === 'status' || key === '상태') map.status = c;
+    else if (key === 'ai') map.ai = c;
+    else if (key === 'failcount' || key === 'fail_count') map.fail_count = c;
+  }
+  return map;
+}
+
+/** Google Sheets 날짜 직렬값(일 단위) → Date */
+function sheetSerialToDate_(serial) {
+  var n = Number(serial);
+  if (!Number.isFinite(n) || n <= 20000 || n >= 120000) {
+    return null;
+  }
+  var ms = Math.round((n - 25569) * 86400 * 1000);
+  var d = new Date(ms);
+  return isNaN(d.getTime()) ? null : d;
+}
+
+/** H/E열: getValues 빈칸일 때 getDisplayValues 문자열 보강 (기본 H=7 폴백) */
+function readSheetTimestampCell_(row, displayRow, colIdx) {
+  var idx = Number(colIdx);
+  if (!Number.isFinite(idx) || idx < 0) {
+    return '';
+  }
+  var out = readSheetTimestampCellAt_(row, displayRow, idx);
+  if (out) {
+    return out;
+  }
+  if (idx !== 7) {
+    return readSheetTimestampCellAt_(row, displayRow, 7);
+  }
+  return '';
+}
+
+function readSheetTimestampCellAt_(row, displayRow, idx) {
+  var raw = '';
+  if (row && row.length > idx) {
+    var v = row[idx];
+    if (v !== undefined && v !== null && v !== '') {
+      raw = v;
+    } else if (v === 0) {
+      raw = v;
+    }
+  }
+  if (raw instanceof Date && !isNaN(raw.getTime())) {
+    return formatLastActivity_(raw);
+  }
+  var serialDate = sheetSerialToDate_(raw);
+  if (serialDate) {
+    return formatLastActivity_(serialDate);
+  }
+  var rs = String(raw != null ? raw : '').trim();
+  if (rs) {
+    var ko = formatLastActivity_(raw);
+    return ko || rs;
+  }
+  if (displayRow && displayRow.length > idx) {
+    var disp = String(displayRow[idx] != null ? displayRow[idx] : '').trim();
+    if (disp) {
+      return formatLastActivity_(disp) || disp;
+    }
+  }
+  return '';
+}
+
+/** JSON 응답용 — Date·시트 표기 문자열을 한국어 시각 문자열로 */
+function formatTimestampFieldForJson_(v) {
+  if (v === undefined || v === null || v === '') {
+    return '';
+  }
+  if (v instanceof Date && !isNaN(v.getTime())) {
+    return formatLastActivity_(v);
+  }
+  var serialDate = sheetSerialToDate_(v);
+  if (serialDate) {
+    return formatLastActivity_(serialDate);
+  }
+  var s = String(v).trim();
+  if (!s) {
+    return '';
+  }
+  var ko = formatLastActivity_(v);
+  return ko || s;
+}
+
 /**
  * 시트 한 행(2행부터) → 객체.
- * A nickname, B classCode, C level, D diag_score, E diag_time,
- * F problem, G type, H timestamp, I~N step1~step6, O total, P hint, Q status, R ai (열 인덱스 0~17)
+ * 신규: I~P step1~step6(+5_1,5_2,5_3), Q total, R hint, S status, T ai, U fail_count
+ * 레거시(열 16개 이하): I~N step1~step6(6칸), O total, …
+ * @param {Array} row getValues() 행
+ * @param {Array=} displayRow getDisplayValues() 행 (timestamp 보강)
+ * @param {Object=} colMap getLearnerSheetColumnMap_
  */
-function rowToRecord_(row) {
+function rowToRecord_(row, displayRow, colMap) {
+  var col = colMap || getDefaultLearnerColMap_();
   function g(i) {
     if (!row || row.length <= i) return '';
     var v = row[i];
     if (v === undefined || v === null) return '';
     return v;
   }
-  var s1 = g(8),
-    s2 = g(9),
-    s3 = g(10),
-    s4 = g(11),
-    s5 = g(12),
+  /** 8단계 열(total@16) 신규 레이아웃은 최소 21열(0~20) */
+  var legacy = !row || row.length < 20;
+  var s1;
+  var s2;
+  var s3;
+  var s4;
+  var s51;
+  var s52;
+  var s53;
+  var s6;
+  var totalIdx;
+  var hintIdx;
+  var statusIdx;
+  var aiIdx;
+  var failIdx;
+  if (legacy) {
+    s1 = g(8);
+    s2 = g(9);
+    s3 = g(10);
+    s4 = g(11);
+    s51 = g(12);
+    s52 = '';
+    s53 = '';
     s6 = g(13);
+    totalIdx = 14;
+    hintIdx = 15;
+    statusIdx = 16;
+    aiIdx = 17;
+    failIdx = 18;
+  } else {
+    s1 = g(col.step1);
+    s2 = g(col.step2);
+    s3 = g(col.step3);
+    s4 = g(col.step4);
+    s51 = g(col.step5_1);
+    s52 = g(col.step5_2);
+    s53 = g(col.step5_3);
+    s6 = g(col.step6);
+    totalIdx = col.total;
+    hintIdx = col.hint;
+    statusIdx = col.status;
+    aiIdx = col.ai;
+    failIdx = col.fail_count;
+  }
   return {
-    nickname: String(g(0)).trim(),
-    classCode: String(g(1)).trim(),
-    level: String(g(2)),
-    diag_score: g(3),
-    diag_time: g(4),
-    problem: String(g(5)),
-    type: String(g(6)),
-    timestamp: g(7),
+    nickname: String(g(col.nickname)).trim(),
+    classCode: String(g(col.classCode)).trim(),
+    level: String(g(col.level)),
+    diag_score: g(col.diag_score),
+    diag_time: readSheetTimestampCell_(row, displayRow, col.diag_time),
+    problem: String(g(col.problem)),
+    type: String(g(col.type)),
+    timestamp: readSheetTimestampCell_(row, displayRow, col.timestamp),
     step1: s1,
     step2: s2,
     step3: s3,
     step4: s4,
-    step5: s5,
+    step5: s51,
+    step5_1: s51,
+    step5_2: s52,
+    step5_3: s53,
     step6: s6,
-    scores: [s1, s2, s3, s4, s5, s6],
-    total: g(14),
-    hint: g(15),
-    totalHint: g(15),
-    status: String(g(16)),
-    ai: String(g(17)),
+    scores: [s1, s2, s3, s4, s51, s52, s53, s6],
+    total: g(totalIdx),
+    hint: g(hintIdx),
+    totalHint: g(hintIdx),
+    status: String(g(statusIdx)),
+    ai: String(g(aiIdx)),
+    fail_count: g(failIdx),
+    failCount: g(failIdx),
   };
 }
 
 function getAllRecordsFromSheet_() {
   var sheet = getTargetSheet_();
-  var values = sheet.getDataRange().getValues();
+  var range = sheet.getDataRange();
+  var values = range.getValues();
+  var displays = range.getDisplayValues();
   if (!values || values.length < 2) {
     return [];
   }
+  var colMap = getLearnerSheetColumnMap_(values[0]);
   var out = [];
   for (var i = 1; i < values.length; i++) {
-    out.push(rowToRecord_(values[i]));
+    out.push(rowToRecord_(values[i], displays[i], colMap));
   }
   return out;
 }
@@ -261,19 +507,38 @@ function lookupNicknameClassCode_(nickname) {
 function fetchStudentRowsForLearner_(nickname, classCode) {
   var nick = String(nickname || '').trim();
   var cc = String(classCode || '').trim();
-  var all = getAllRecordsFromSheet_();
+  var sheet = getTargetSheet_();
+  var range = sheet.getDataRange();
+  var values = range.getValues();
+  var displays = range.getDisplayValues();
+  if (!values || values.length < 2) {
+    return {
+      data: [],
+      completedProblems: [],
+      failedProblems: [],
+      failedRecords: [],
+    };
+  }
+  var colMap = getLearnerSheetColumnMap_(values[0]);
+  var ccNorm = adminClassCodeNorm_(cc);
   var filtered = [];
-  for (var i = 0; i < all.length; i++) {
-    var r = all[i];
+  for (var rowIdx = 1; rowIdx < values.length; rowIdx++) {
+    var r = rowToRecord_(values[rowIdx], displays[rowIdx], colMap);
     if (String(r.nickname || '').trim() !== nick) {
       continue;
     }
-    if (String(r.classCode || '').trim() !== cc) {
+    if (adminClassCodeNorm_(r.classCode) !== ccNorm) {
       continue;
     }
-    filtered.push(r);
+    filtered.push(recordToAdminHistoryPayload_(r, rowIdx + 1));
   }
-  return { data: filtered };
+  var accum = accumulateProblemStatusFromRecords_(filtered);
+  return {
+    data: filtered,
+    completedProblems: accum.completedProblems,
+    failedProblems: accum.failedProblems,
+    failedRecords: accum.failedRecords,
+  };
 }
 
 /**
@@ -340,23 +605,68 @@ function hintFromRecord_(r) {
 /**
  * student_history records 한 행. 필드 고정 (프론트·관리자 팝업과 맞춤).
  */
+/**
+ * 수련 행 전체에서 문항별 성공·실패 누적 (성공이 있으면 해당 문항은 completed만).
+ * @param {Array.<Object>} records
+ * @returns {{ completedProblems: string[], failedProblems: string[], failedRecords: Object[] }}
+ */
+function accumulateProblemStatusFromRecords_(records) {
+  var completedSet = {};
+  var failedSet = {};
+  var failedRecords = [];
+  var list = records || [];
+  for (var i = 0; i < list.length; i++) {
+    var rec = list[i];
+    var prob = String(rec.problem || '').trim().toUpperCase();
+    if (!/^\d+-[A-Z]$/.test(prob)) {
+      continue;
+    }
+    var st = String(rec.status || '').trim();
+    if (st === '성공' || st.toLowerCase() === 'success') {
+      completedSet[prob] = true;
+    } else if (st === '실패' || st.toLowerCase() === 'fail') {
+      failedSet[prob] = true;
+      failedRecords.push(rec);
+    }
+  }
+  var completedProblems = Object.keys(completedSet).sort();
+  var failedProblems = [];
+  var failedKeys = Object.keys(failedSet);
+  for (var j = 0; j < failedKeys.length; j++) {
+    var code = failedKeys[j];
+    if (!completedSet[code]) {
+      failedProblems.push(code);
+    }
+  }
+  failedProblems.sort();
+  return {
+    completedProblems: completedProblems,
+    failedProblems: failedProblems,
+    failedRecords: failedRecords,
+  };
+}
+
 function recordToAdminHistoryPayload_(r, sheetRow1Based) {
   return {
     nickname: String(r.nickname || '').trim(),
     classCode: String(r.classCode || '').trim(),
     level: String(r.level || ''),
     diag_score: r.diag_score,
-    diag_time: r.diag_time,
+    diag_time: formatTimestampFieldForJson_(r.diag_time),
     problem: String(r.problem || ''),
     type: String(r.type || ''),
-    timestamp: r.timestamp,
+    timestamp: formatTimestampFieldForJson_(r.timestamp),
     step1: stepFromRecord_(r, 0),
     step2: stepFromRecord_(r, 1),
     step3: stepFromRecord_(r, 2),
     step4: stepFromRecord_(r, 3),
     step5: stepFromRecord_(r, 4),
-    step6: stepFromRecord_(r, 5),
+    step5_1: r.step5_1 != null && r.step5_1 !== '' ? r.step5_1 : stepFromRecord_(r, 4),
+    step5_2: r.step5_2 != null && r.step5_2 !== '' ? r.step5_2 : '',
+    step5_3: r.step5_3 != null && r.step5_3 !== '' ? r.step5_3 : '',
+    step6: r.step6 != null && r.step6 !== '' ? r.step6 : stepFromRecord_(r, 5),
     total: r.total,
+    fail_count: r.fail_count != null && r.fail_count !== '' ? r.fail_count : r.failCount,
     hint: hintFromRecord_(r),
     status: String(r.status || ''),
     ai: String(r.ai || ''),
@@ -372,33 +682,46 @@ function handleStudentHistoryGet_(p) {
     return { result: 'error', message: 'missing_nickname_or_classCode', records: [] };
   }
   var sheet = getTargetSheet_();
-  var values = sheet.getDataRange().getValues();
+  var range = sheet.getDataRange();
+  var values = range.getValues();
+  var displays = range.getDisplayValues();
   if (!values || values.length < 2) {
     return { result: 'success', records: [] };
   }
-  var matched = [];
+  var colMap = getLearnerSheetColumnMap_(values[0]);
+  var matchedRaw = [];
   for (var rowIdx = 1; rowIdx < values.length; rowIdx++) {
-    var r = rowToRecord_(values[rowIdx]);
+    var r = rowToRecord_(values[rowIdx], displays[rowIdx], colMap);
     if (String(r.nickname || '').trim() !== nick) {
       continue;
     }
     if (adminClassCodeNorm_(r.classCode) !== ccNorm) {
       continue;
     }
-    var sheetRow1Based = rowIdx + 1;
-    matched.push(recordToAdminHistoryPayload_(r, sheetRow1Based));
+    matchedRaw.push({ r: r, sheetRow: rowIdx + 1 });
   }
-  matched.sort(function (a, b) {
-    var ta = adminHistoryRowTimeMs_(a);
-    var tb = adminHistoryRowTimeMs_(b);
+  matchedRaw.sort(function (a, b) {
+    var ta = adminHistoryRowTimeMs_(a.r);
+    var tb = adminHistoryRowTimeMs_(b.r);
     if (ta !== tb) {
       return ta - tb;
     }
-    var ra = Number(a.sheetRow) || 0;
-    var rb = Number(b.sheetRow) || 0;
-    return ra - rb;
+    return (Number(a.sheetRow) || 0) - (Number(b.sheetRow) || 0);
   });
-  return { result: 'success', records: matched };
+  var matched = [];
+  for (var m = 0; m < matchedRaw.length; m++) {
+    matched.push(
+      recordToAdminHistoryPayload_(matchedRaw[m].r, matchedRaw[m].sheetRow)
+    );
+  }
+  var accum = accumulateProblemStatusFromRecords_(matched);
+  return {
+    result: 'success',
+    records: matched,
+    completedProblems: accum.completedProblems,
+    failedProblems: accum.failedProblems,
+    failedRecords: accum.failedRecords,
+  };
 }
 
 function pad2_(n) {
@@ -448,7 +771,9 @@ function activityMsForRecord_(r, stableIdx) {
 
 function formatStatusKo_(s) {
   var k = String(s || '').trim();
-  if (k === 'training_completed' || k === 'completed') return '수련완료';
+  if (k === '성공') return '성공';
+  if (k === '실패') return '실패';
+  if (k === 'training_completed' || k === 'completed' || k === '수련완료') return '수련완료';
   if (k === 'diagnostic_completed' || k === '진단완료') return '진단완료';
   if (k === 'in_progress') return '진행중';
   return k || '—';
@@ -463,10 +788,11 @@ function rowHasDiagnostic_(r) {
   return false;
 }
 
-/** 수련 완료 행만 (문제별 학습 분석용) — 값·대소문자·공백 변형 허용 */
+/** 수련 시도 행 (성공·실패·레거시 수련완료) */
 function isTrainingCompletedRowForStats_(r) {
   var raw = String(r && r.status != null ? r.status : '').trim();
   if (!raw) return false;
+  if (raw === '성공' || raw === '실패') return true;
   var lo = raw.toLowerCase();
   if (lo === 'training_completed' || lo === 'completed') return true;
   var compactKo = raw.replace(/\s+/g, '');
@@ -478,6 +804,70 @@ function hintNumericFromRow_(r) {
   var raw = r.hint != null && r.hint !== '' ? r.hint : r.totalHint;
   var n = Number(raw);
   return Number.isFinite(n) ? n : 0;
+}
+
+function normalizeTrainingKind_(raw) {
+  var t = String(raw || '').trim().replace(/\s+/g, '');
+  if (t === '본문제') return '본문제';
+  if (t === '유사문제1') return '유사문제1';
+  return t;
+}
+
+function isTrainingSuccessStatusRow_(r) {
+  var st = String(r && r.status != null ? r.status : '').trim();
+  return st === '성공' || st.toLowerCase() === 'success';
+}
+
+function isTrainingFailStatusRow_(r) {
+  var st = String(r && r.status != null ? r.status : '').trim();
+  return st === '실패' || st.toLowerCase() === 'fail';
+}
+
+function isTrainingHistoryRowForSummary_(r) {
+  var st = String(r && r.status != null ? r.status : '').trim();
+  if (st === '진단완료' || st === 'diagnostic_completed') return false;
+  return true;
+}
+
+function problemCodeNormForSummary_(r) {
+  var prob = String(r.problem || '').trim().toUpperCase();
+  return /^\d+-[A-Z]$/.test(prob) ? prob : '';
+}
+
+/**
+ * nickname별 items({r, idx})에서 수련 요약 집계 (진단완료 행 제외).
+ * @param {Array.<{r: Object, idx: number}>} items
+ */
+function summarizeStudentTrainingMetricsFromItems_(items) {
+  var mainSuccess = {};
+  var mainFail = {};
+  var simSuccess = {};
+  var simFail = {};
+  var trainingRows = [];
+  var list = items || [];
+  for (var i = 0; i < list.length; i++) {
+    var r = list[i].r;
+    if (!isTrainingHistoryRowForSummary_(r)) continue;
+    var prob = problemCodeNormForSummary_(r);
+    if (!prob) continue;
+    trainingRows.push(r);
+    var kind = normalizeTrainingKind_(r.type);
+    if (kind === '본문제') {
+      if (isTrainingSuccessStatusRow_(r)) mainSuccess[prob] = true;
+      if (isTrainingFailStatusRow_(r)) mainFail[prob] = true;
+    } else if (kind === '유사문제1') {
+      if (isTrainingSuccessStatusRow_(r)) simSuccess[prob] = true;
+      if (isTrainingFailStatusRow_(r)) simFail[prob] = true;
+    }
+  }
+  var accum = accumulateProblemStatusFromRecords_(trainingRows);
+  return {
+    mainSuccessCount: Object.keys(mainSuccess).length,
+    mainFailCount: Object.keys(mainFail).length,
+    similarSuccessCount: Object.keys(simSuccess).length,
+    similarFailCount: Object.keys(simFail).length,
+    mathCardCount: accum.completedProblems.length,
+  };
 }
 
 /** 유형 열(G) 표시 순서: 본문제 → 유사문제1 → 유사문제2 → 기타 */
@@ -633,7 +1023,7 @@ function pickClassRosterLevel_(items, latest) {
     .trim();
 }
 
-/** GET ?action=class_roster&classCode= — Sheet1, nickname별 집계 */
+/** GET ?action=class_roster&classCode= — Sheet2, nickname별 집계 */
 function handleClassRosterGet_(p) {
   var code = String(p.classCode || '').trim();
   if (!code) {
@@ -694,6 +1084,19 @@ function handleClassRosterGet_(p) {
     if (!lastAct && latest.diag_time) {
       lastAct = formatLastActivity_(latest.diag_time);
     }
+    for (var la = 0; la < items.length; la++) {
+      var msLa = activityMsForRecord_(items[la].r, items[la].idx);
+      if (msLa > lastMs) {
+        lastMs = msLa;
+        var rLa = items[la].r;
+        var actLa = formatLastActivity_(rLa.timestamp);
+        if (!actLa && rLa.diag_time) {
+          actLa = formatLastActivity_(rLa.diag_time);
+        }
+        if (actLa) lastAct = actLa;
+      }
+    }
+    var metrics = summarizeStudentTrainingMetricsFromItems_(items);
     summaries.push({
       sortMs: lastMs,
       row: {
@@ -706,6 +1109,11 @@ function handleClassRosterGet_(p) {
         latestTotal: latestTotalOut,
         latestStatus: formatStatusKo_(latest.status),
         lastActivity: lastAct,
+        mainSuccessCount: metrics.mainSuccessCount,
+        mainFailCount: metrics.mainFailCount,
+        similarSuccessCount: metrics.similarSuccessCount,
+        similarFailCount: metrics.similarFailCount,
+        mathCardCount: metrics.mathCardCount,
       },
     });
   }
@@ -994,6 +1402,47 @@ function handleDeleteClassPost_(data) {
     if (normalizeEmailForCompareClasses_(rowEmailRaw) === teacherEmailNorm && rowCode === classCode) {
       sh.deleteRow(i + 1); // values는 0-index, 시트는 1-index + header
       return { result: 'success' };
+    }
+  }
+  return { result: 'not_found', message: '해당 클래스 코드를 찾지 못했습니다.' };
+}
+
+/** POST action=update_class — className(C열)만 변경, classCode는 유지 */
+function handleUpdateClassPost_(data) {
+  var teacherEmailRaw = String(data.teacherEmail || '').trim();
+  var classCode = String(data.classCode || '').trim().toUpperCase();
+  var className = String(data.className || '').trim();
+  var teacherEmailNorm = normalizeEmailForCompareClasses_(teacherEmailRaw);
+  if (!teacherEmailNorm || !classCode || !className) {
+    return {
+      result: 'error',
+      message: 'missing_teacherEmail_or_classCode_or_className',
+    };
+  }
+
+  var sh = getOrCreateClassesSheet_();
+  var values = sh.getDataRange().getValues();
+  if (!values || values.length < 2) {
+    return { result: 'not_found', message: '수정할 클래스가 없습니다.' };
+  }
+
+  for (var i = 1; i < values.length; i++) {
+    var row = padSheetRow_(values[i], 4);
+    var rowEmailRaw = String(row[0] != null ? row[0] : '').trim();
+    var rowCode = String(row[1] != null ? row[1] : '').trim().toUpperCase();
+    if (normalizeEmailForCompareClasses_(rowEmailRaw) === teacherEmailNorm && rowCode === classCode) {
+      var sheetRow = i + 1;
+      sh.getRange(sheetRow, 3).setNumberFormat('@');
+      sh.getRange(sheetRow, 3).setValue(className);
+      return {
+        result: 'success',
+        class: {
+          teacherEmail: rowEmailRaw || teacherEmailRaw,
+          classCode: rowCode,
+          className: className,
+          createdAt: String(row[3] != null ? row[3] : '').trim(),
+        },
+      };
     }
   }
   return { result: 'not_found', message: '해당 클래스 코드를 찾지 못했습니다.' };
@@ -1575,6 +2024,120 @@ function newPayloadToContext_(pl) {
 }
 
 /**
+ * 관리자 대시보드 — 문제별 통계 payload → OpenAI JSON 5섹션 (React extractAnalysisFromAppsScriptResponse 호환).
+ */
+function generateAdminProblemAnalysis_(payload) {
+  var key = getOpenAiApiKey_();
+  if (!key) {
+    Logger.log('[admin_problem_analysis] missing OPENAI_API_KEY');
+    return { ok: false, message: 'missing_openai_key' };
+  }
+  var pl = payload || {};
+  var problem = String(pl.problem || '').trim();
+  var stats = Array.isArray(pl.stats) ? pl.stats : [];
+  var summaryLines = Array.isArray(pl.typePatternSummary) ? pl.typePatternSummary : [];
+  var records = Array.isArray(pl.records) ? pl.records : [];
+  var compact = {
+    classCode: String(pl.classCode || '').trim(),
+    problem: problem,
+    stats: stats.slice(0, 24),
+    typePatternSummary: summaryLines.slice(0, 24),
+    highFailRateTypes: Array.isArray(pl.highFailRateTypes) ? pl.highFailRateTypes : [],
+    lowestAvgTotalType: pl.lowestAvgTotalType || null,
+    mostParticipantsType: pl.mostParticipantsType || null,
+    recordSample: records.slice(0, 48),
+  };
+
+  var userBlock =
+    '역할: 중학교 수학(일차방정식) 클래스의 수련 결과를 해석하는 교육 데이터 분석 보조.\n' +
+    '아래 JSON은 한 클래스에서 문제 코드 [' +
+    problem +
+    ']에 대한 유형별 집계와 일부 학습 기록이다.\n\n' +
+    JSON.stringify(compact, null, 2) +
+    '\n\n요구: 반드시 유효한 JSON 객체 하나만 출력. 마크다운·코드펜스·설명 문장 금지.\n' +
+    '키 다섯 개(모두 문자열): learningTrend, majorDifficulty, misconception, teachingGuide, recommendedActivities.\n' +
+    'learningTrend: 유형 간 평균·편차 등 학습 경향을 2~4문장.\n' +
+    'majorDifficulty: 어려움이 큰 유형·실패 패턴을 2~4문장.\n' +
+    'misconception: 추정되는 오개념·개념 공백을 2~4문장.\n' +
+    'teachingGuide: 수업·보충 지도 순서를 2~4문장.\n' +
+    'recommendedActivities: 학생 활동·추가 연습 제안을 2~4문장.\n' +
+    '입력에 없는 수치는 지어내지 말고, 데이터가 부족하면 그 사실을 한 줄로 밝힌다.';
+
+  var system =
+    '너는 출력으로 JSON 객체만 반환한다. 한국어 값. JSON 외 텍스트 금지.';
+
+  var body = {
+    model: 'gpt-4o-mini',
+    messages: [
+      { role: 'system', content: system },
+      { role: 'user', content: userBlock },
+    ],
+    temperature: 0.35,
+    max_tokens: 2800,
+    response_format: { type: 'json_object' },
+  };
+
+  try {
+    var res = UrlFetchApp.fetch('https://api.openai.com/v1/chat/completions', {
+      method: 'post',
+      contentType: 'application/json',
+      headers: { Authorization: 'Bearer ' + key },
+      payload: JSON.stringify(body),
+      muteHttpExceptions: true,
+    });
+    var httpCode = res.getResponseCode();
+    var raw = res.getContentText();
+    Logger.log('[admin_problem_analysis] HTTP ' + httpCode);
+    if (httpCode !== 200) {
+      Logger.log(raw);
+      return { ok: false, message: 'openai_http_' + httpCode };
+    }
+    var outer = JSON.parse(raw);
+    var msg =
+      outer.choices &&
+      outer.choices[0] &&
+      outer.choices[0].message &&
+      outer.choices[0].message.content;
+    var content = msg ? String(msg).trim() : '';
+    if (!content) {
+      return { ok: false, message: 'empty_content' };
+    }
+    content = stripJsonFenceForAdmin_(content);
+    var obj = JSON.parse(content);
+    var a = {
+      learningTrend: String(obj.learningTrend || '').trim(),
+      majorDifficulty: String(obj.majorDifficulty || '').trim(),
+      misconception: String(obj.misconception || '').trim(),
+      teachingGuide: String(obj.teachingGuide || '').trim(),
+      recommendedActivities: String(obj.recommendedActivities || '').trim(),
+    };
+
+    if (
+      !a.learningTrend ||
+      !a.majorDifficulty ||
+      !a.misconception ||
+      !a.teachingGuide ||
+      !a.recommendedActivities
+    ) {
+      return { ok: false, message: 'incomplete_analysis_json' };
+    }
+    return { ok: true, analysis: a };
+  } catch (e) {
+    Logger.log('[admin_problem_analysis] parse/call ' + e);
+    return { ok: false, message: String(e && e.message ? e.message : e) };
+  }
+}
+
+/** 모델이 ```json ... ``` 로 감싼 경우 제거 */
+function stripJsonFenceForAdmin_(text) {
+  var t = String(text || '').trim();
+  if (t.indexOf('```') === 0) {
+    t = t.replace(/^```[a-zA-Z]*\s*/, '').replace(/\s*```\s*$/, '');
+  }
+  return t.trim();
+}
+
+/**
  * 단계·문제 맥락·학생 답을 반영한 맞춤 피드백 (doPost generate_ai_feedback). OPENAI_API_KEY 사용.
  */
 function generateAIFeedback_(payload) {
@@ -1858,10 +2421,18 @@ function templateTrainingAiFeedbackFromContext_(ctx) {
 }
 
 /** 스프레드시트·시트 이름은 환경에 맞게 수정 */
+/** 학습자 진단·수련 기록 (신규 사용자는 Sheet2만 사용) */
+var LEARNER_DATA_SHEET_NAME_ = 'Sheet2';
+
 function getTargetSheet_() {
   var ss = SpreadsheetApp.getActiveSpreadsheet();
-  var sheet = ss.getSheetByName('Sheet1');
-  if (!sheet) sheet = ss.getSheets()[0];
+  var sheet = ss.getSheetByName(LEARNER_DATA_SHEET_NAME_);
+  if (!sheet) {
+    sheet = ss.getSheetByName('Sheet1');
+  }
+  if (!sheet) {
+    sheet = ss.getSheets()[0];
+  }
   return sheet;
 }
 
@@ -1876,7 +2447,7 @@ function buildRowFromPayload_(data) {
 
   var status = String(data.status || '');
   var diagCell = '';
-  if (status === 'diagnostic_completed') {
+  if (status === 'diagnostic_completed' || status === '진단완료') {
     if (
       Object.prototype.hasOwnProperty.call(data, 'diag_score') &&
       Number.isFinite(Number(data.diag_score))
@@ -1897,8 +2468,15 @@ function buildRowFromPayload_(data) {
 
   var steps = normalizeSteps_(data);
 
-  var totalCell = firstFiniteNumber_(data.total);
-  if (totalCell == null) totalCell = '';
+  var isDiagnostic = status === 'diagnostic_completed' || status === '진단완료';
+  var totalCell = '';
+  var failCell = '';
+  if (!isDiagnostic) {
+    totalCell = firstFiniteNumber_(data.total, data.successCount);
+    if (totalCell == null) totalCell = '';
+    failCell = firstFiniteNumber_(data.fail_count, data.failCount);
+    if (failCell == null) failCell = '';
+  }
 
   var hint = data.totalHint != null && data.totalHint !== '' ? Number(data.totalHint) : '';
   if (!Number.isFinite(hint)) hint = '';
@@ -1920,10 +2498,13 @@ function buildRowFromPayload_(data) {
     steps[3],
     steps[4],
     steps[5],
+    steps[6],
+    steps[7],
     totalCell,
     hint,
     status,
     ai,
+    failCell,
   ];
 }
 
@@ -1937,13 +2518,43 @@ function firstFiniteNumber_() {
 }
 
 function normalizeSteps_(data) {
-  var out = ['', '', '', '', '', ''];
+  var keys = [
+    'step1',
+    'step2',
+    'step3',
+    'step4',
+    'step5_1',
+    'step5_2',
+    'step5_3',
+    'step6',
+  ];
+  var out = ['', '', '', '', '', '', '', ''];
+  var j;
+  for (j = 0; j < 8; j++) {
+    if (data && Object.prototype.hasOwnProperty.call(data, keys[j])) {
+      var direct = data[keys[j]];
+      if (direct === 0) {
+        out[j] = 0;
+      } else if (direct !== '' && direct != null) {
+        var nDirect = Number(direct);
+        out[j] = Number.isFinite(nDirect) ? nDirect : '';
+      }
+    }
+  }
+  if (data && data.step5 !== undefined && data.step5 !== '' && out[4] === '') {
+    var legacy5 = Number(data.step5);
+    if (data.step5 === 0) out[4] = 0;
+    else if (Number.isFinite(legacy5)) out[4] = legacy5;
+  }
   var arr = data.scores;
   if (Array.isArray(arr)) {
-    for (var j = 0; j < 6 && j < arr.length; j++) {
+    for (j = 0; j < 8 && j < arr.length; j++) {
       var v = arr[j];
-      out[j] = v === '' || v == null ? '' : Number(v);
-      if (!Number.isFinite(out[j])) out[j] = '';
+      if (v === '' || v == null) {
+        continue;
+      }
+      var n = Number(v);
+      out[j] = Number.isFinite(n) ? n : '';
     }
   }
   return out;

@@ -1,19 +1,38 @@
+import {
+  resolveCanonicalDiagnosticTier,
+  TIER_TERMINAL_TRAINING_PROBLEM_CODE,
+} from '../levelConfig'
 import { nextProblemLogic } from './nextProblemLogic'
+import { resolveFailCountFromRecord } from './trainingProblemProgress'
 import { normalizeTrainingKind } from './trainingRowSelect'
+import { resolveRecordSheetStatus, SHEET_STATUS } from './trainingStatus'
 
-/** 구글 시트 등에서 받은 레코드가 「수련완료」만 인정할 때 통과 여부 */
+/** 수련 시도 행(성공·실패·레거시 수련완료) */
 export function isTrainingCompletedSheetRecord(record) {
   if (!record || typeof record !== 'object') return false
-  const raw =
-    record.status ??
-    record.__status ??
-    record?.상태 ??
-    ''
-  const normalized = String(raw || '').trim()
-  if (!normalized) return false
-  if (normalized === 'training_completed') return true
-  if (normalized === '수련완료') return true
-  if (normalized === 'completed') return true
+  const st = resolveRecordSheetStatus(record)
+  return st === SHEET_STATUS.SUCCESS || st === SHEET_STATUS.FAIL
+}
+
+/**
+ * 해당 티어 수련을 끝까지 마친 상태인지(마지막 문항 완료 저장 행).
+ * 재입장 시 `resolveNextTrainingRowIndex === -1` 과 동일 조건을 시트 필드만으로 판별.
+ */
+export function isLatestRecordAtTierCurriculumEnd(record, tierKeyRaw) {
+  if (!record || typeof record !== 'object') return false
+  const tier = resolveCanonicalDiagnosticTier(tierKeyRaw)
+  const terminal = TIER_TERMINAL_TRAINING_PROBLEM_CODE[tier]
+  if (!terminal) return false
+  const problem = String(record.problem ?? record.문항번호 ?? '').trim().toUpperCase()
+  if (problem !== terminal) return false
+  const st = resolveRecordSheetStatus(record)
+  if (st !== SHEET_STATUS.SUCCESS) return false
+  const kind = normalizeTrainingKind(record.type ?? record.trainingType ?? record.유형)
+  if (kind === '유사문제1') return true
+  if (kind === '본문제') {
+    const fc = resolveFailCountFromRecord(record)
+    return fc != null && fc < 2
+  }
   return false
 }
 
@@ -27,9 +46,9 @@ export function computeResumeTargetAfterSheetCompletion(record) {
   const problem = String(record?.problem ?? record?.문항번호 ?? '').trim().toUpperCase()
   let kind = normalizeTrainingKind(record?.type ?? record?.trainingType)
   if (!kind) kind = '본문제'
-  const total = Number.isFinite(Number(record?.total)) ? Number(record.total) : 0
+  const failCount = resolveFailCountFromRecord(record) ?? 0
 
-  const { nextType, nextProblem } = nextProblemLogic(kind, total, problem, {
+  const { nextType, nextProblem } = nextProblemLogic(kind, failCount, problem, {
     useSimilarProblems: true,
   })
 

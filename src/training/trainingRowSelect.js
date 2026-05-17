@@ -4,7 +4,6 @@ export function normalizeTrainingKind(raw) {
   const text = String(raw ?? '').trim().replace(/\s+/g, '')
   if (text === '본문제') return '본문제'
   if (text === '유사문제1') return '유사문제1'
-  if (text === '유사문제2') return '유사문제2'
   return text
 }
 
@@ -40,7 +39,7 @@ export function findMatchingTrainingRowIndex(rows, stage, typeCode, trainingType
  * 수련 완료 직후, 총점(total)과 유사문제 규칙으로 다음 행 인덱스를 구합니다.
  * 정확한 행이 없으면 그 뒤 순서에서 첫 본문제로 폴백합니다.
  */
-export function resolveNextTrainingRowIndex(rows, currentRow, totalScore, quiet = false) {
+export function resolveNextTrainingRowIndex(rows, currentRow, failCount, quiet = false) {
   if (!currentRow || !rows?.length) return -1
 
   const stage = Number(currentRow.__poolStage ?? currentRow['단계'])
@@ -48,7 +47,7 @@ export function resolveNextTrainingRowIndex(rows, currentRow, totalScore, quiet 
   const kind = normalizeTrainingKind(currentRow?.type)
   const problemCode = `${stage}-${letter}`
 
-  const { nextType, nextProblem } = nextProblemLogic(kind, totalScore, problemCode, {
+  const { nextType, nextProblem } = nextProblemLogic(kind, failCount, problemCode, {
     useSimilarProblems: true,
   })
 
