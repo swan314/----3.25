@@ -12,7 +12,6 @@ import {
   resolveCanonicalDiagnosticTier,
 } from './levelConfig'
 import {
-  buildShortCoachingFeedback,
   fetchStudentLearningProgress,
   postGenerateAiFeedback,
   updateSupplement,
@@ -77,7 +76,7 @@ import {
 import ScratchPadModal from './components/ScratchPadModal'
 import StepFocusedLearningModal from './components/StepFocusedLearningModal'
 import { collectStepTrainingConceptBundles } from './training/stepTrainingContent'
-import { formatStudentAiFeedbackForDisplay } from './studentAiFeedbackDisplay'
+import { generateStudentFeedback, getStudentFeedbackDisplayText } from './training/studentAiFeedback'
 
 const DEFAULT_CSV_PATH = '/data/training_problems_with_similar_v2.csv'
 const DEFAULT_HINTS_CSV_PATH = '/data/hints_structured.csv'
@@ -103,25 +102,42 @@ function buildTrainingResultSessionSnapshot({
   hintUsageCount,
   problemCode,
   trainingType,
+  successCount,
+  failCount,
+  awardedCard,
 }) {
   const kind = normalizeTrainingKind(trainingType) || '본문제'
   const code = String(problemCode || '').trim().toUpperCase()
+  const steps = (completedSteps || []).map((s) => ({ ...s }))
+  const success =
+    Number.isFinite(Number(successCount)) ?
+      Math.max(0, Math.round(Number(successCount)))
+    : steps.filter((s) => Number(s.processResult) > 0).length
+  const fail =
+    Number.isFinite(Number(failCount)) ?
+      Math.max(0, Math.round(Number(failCount)))
+    : steps.filter((s) => Number(s.processResult) === 0).length
+  const card = awardedCard
+    ? {
+        name: String(awardedCard.name || '매쓰카드').trim(),
+        image: String(awardedCard.image || '').trim(),
+        code: String(awardedCard.code ?? awardedCard.problem ?? '').trim(),
+      }
+    : null
   return {
     problemCode: code,
     trainingType: kind,
     problemText: String(row?.['문제 텍스트'] ?? ''),
     summary: `현재 수련 문제: ${code} / ${kind}`,
-    completedSteps: (completedSteps || []).map((s) => ({ ...s })),
+    completedSteps: steps,
     activeStepCount: Number(activeStepCount) || 0,
     hintUsageCount: Number(hintUsageCount) || 0,
+    successCount: success,
+    failCount: fail,
+    status: resolveTrainingSaveStatus(kind, fail),
+    awardedCard: card,
   }
 }
-
-const POSITIVE_FEEDBACK = [
-  '아주 좋아요! 이 흐름을 계속 유지해봐요.',
-  '정확해요! 생각 과정을 잘 잡았어요.',
-  '좋습니다! 이 흐름을 이어가 봐요.',
-]
 
 const RETRY_CHALLENGE_MESSAGES = {
   retry_similar1: '아직 MATH-CARD를 얻지 못했어요. 비슷한 문제로 다시 한번 도전해볼까요?',
@@ -263,10 +279,6 @@ export function shouldAwardMathCard(type, failCount) {
   return false
 }
 
-/** 네트워크 실패 시 — 서버 응답 없이 로컬 단계 템플릿만 사용 */
-function buildLocalTrainingAiFallback(_totalScore, aiPayload) {
-  return buildShortCoachingFeedback('', aiPayload)
-}
 
 function mathCardVaultSlotClassName({ opened, isNew }) {
   return [
@@ -450,7 +462,6 @@ export default function TrainingMode({
   /** 괄호 빈칸 값: 키 `${stepIdx}-${blankIdx}` */
   const [blankValues, setBlankValues] = useState({})
   const [textAnswer, setTextAnswer] = useState('')
-  const [successMessage, setSuccessMessage] = useState('')
   const [answerCheckState, setAnswerCheckState] = useState('')
   const [wrongAttemptStreak, setWrongAttemptStreak] = useState(0)
   const [stepWrongCounts, setStepWrongCounts] = useState(() => emptyStepCounts())
@@ -551,6 +562,8 @@ export default function TrainingMode({
   const stepWrongCountsRef = useRef(emptyStepCounts())
   const stepHintUsedRef = useRef(emptyStepFlags())
   const savedTrainingKeysRef = useRef(new Set())
+  /** saveKey → generateStudentFeedback 최종 문자열 (화면·시트 동일) */
+  const savedAiFeedbackByKeyRef = useRef({})
   const revealedStudentAnswerByStepRef = useRef({})
   const trainingSessionActiveRef = useRef(false)
   const isResultViewRef = useRef(false)
@@ -593,7 +606,6 @@ export default function TrainingMode({
     setStepIdx(0)
     setBlankValues({})
     setTextAnswer('')
-    setSuccessMessage('')
     setAnswerCheckState('')
     setWrongAttemptStreak(0)
     setStepWrongCounts(emptyStepCounts())
@@ -616,6 +628,7 @@ export default function TrainingMode({
     setAwardedMathCardPopup(null)
     setIsMathCardCollectionOpen(false)
     savedTrainingKeysRef.current = new Set()
+    savedAiFeedbackByKeyRef.current = {}
     revealedStudentAnswerByStepRef.current = {}
     setTrainingSessionActive(false)
     setFlippingProblemCode(null)
@@ -972,15 +985,24 @@ export default function TrainingMode({
         activeStepCount: resultSessionSnapshot.activeStepCount,
         hintUsageCount: resultSessionSnapshot.hintUsageCount,
         problemCode: resultSessionSnapshot.problemCode,
+        successCount: resultSessionSnapshot.successCount,
+        failCount: resultSessionSnapshot.failCount,
+        status: resultSessionSnapshot.status,
+        awardedCard: resultSessionSnapshot.awardedCard,
       }
     }
+    const steps = completedSteps || []
     return {
       summary: currentTrainingProblemSummary,
       problemText: String(row?.['문제 텍스트'] ?? ''),
-      completedSteps,
+      completedSteps: steps,
       activeStepCount,
       hintUsageCount,
       problemCode: '',
+      successCount: steps.filter((s) => Number(s.processResult) > 0).length,
+      failCount: steps.filter((s) => Number(s.processResult) === 0).length,
+      status: '',
+      awardedCard: null,
     }
   }, [
     isResultView,
@@ -1086,7 +1108,6 @@ export default function TrainingMode({
     setTextAnswer('')
     setSelectedChoice('')
     setSelectedChoiceToken('')
-    setSuccessMessage('')
     setAnswerCheckState('')
     setWrongAttemptStreak(0)
     setStepWrongCounts(emptyStepCounts())
@@ -1108,14 +1129,8 @@ export default function TrainingMode({
     setSelectedChoiceToken('')
     setTextAnswer('')
     setAnswerCheckState('')
-    setSuccessMessage('')
     setWrongAttemptStreak(0)
   }, [stepIdx, problemIdx])
-
-  useEffect(() => {
-    if (answerCheckState !== 'correct') return
-    if (canAdvance) setSuccessMessage(POSITIVE_FEEDBACK[stepIdx % POSITIVE_FEEDBACK.length])
-  }, [canAdvance, stepIdx])
 
   const stepLabel = useMemo(() => getTrainingStageDisplayLabel(stepIdx), [stepIdx])
   const isDiagnosticStyleMathStep = stepIdx === 2
@@ -1161,7 +1176,6 @@ export default function TrainingMode({
     const latex = (mf.getValue('latex') || '').trim()
     setTextAnswer(latexToPlain(latex))
     setAnswerCheckState('')
-    setSuccessMessage('')
   }
 
   const insertFractionTemplate = (targetEl) => {
@@ -1254,7 +1268,7 @@ export default function TrainingMode({
     const mf = document.createElement('math-field')
     mf.setAttribute(
       'style',
-      'min-height:46px;width:100%;border:1px solid rgb(252 211 77);border-radius:0.75rem;padding:0.45rem 0.75rem;background-color:white;'
+      'min-height:38px;width:100%;border:1px solid rgb(252 211 77);border-radius:0.75rem;padding:0.3rem 0.65rem;background-color:white;font-size:0.9375rem;'
     )
     host.appendChild(mf)
     mathFieldRef.current = mf
@@ -1286,7 +1300,6 @@ export default function TrainingMode({
     if (!inputEl) {
       setTextAnswer((prev) => `${prev}${token}`)
       setAnswerCheckState('')
-      setSuccessMessage('')
       return
     }
     const start = inputEl.selectionStart ?? textAnswer.length
@@ -1294,7 +1307,6 @@ export default function TrainingMode({
     const nextValue = `${textAnswer.slice(0, start)}${token}${textAnswer.slice(end)}`
     setTextAnswer(nextValue)
     setAnswerCheckState('')
-    setSuccessMessage('')
     window.requestAnimationFrame(() => {
       inputEl.focus()
       const cursor = start + token.length
@@ -1305,31 +1317,31 @@ export default function TrainingMode({
   const renderMathPad = (withXPrefix = false, options = {}) => {
     const { hideMathField = false } = options
     return (
-    <div className="space-y-2">
+    <div className="space-y-1.5">
       {!hideMathField && (
         <div className="flex items-stretch gap-2">
           {withXPrefix && (
-            <span className="inline-flex items-center rounded-xl border border-yellow-300 bg-yellow-50 px-3 py-2 text-base font-black text-slate-800">
+            <span className="inline-flex items-center rounded-xl border border-yellow-300 bg-yellow-50 px-2.5 py-1.5 text-sm font-black text-slate-800">
               x=
             </span>
           )}
           {isMathLiveReady ? (
-            <div ref={mathFieldHostRef} className="flex-1" />
+            <div ref={mathFieldHostRef} className="training-math-field-host flex-1" />
           ) : (
-            <div className="flex min-h-[46px] flex-1 items-center rounded-xl border border-yellow-300 bg-white px-3 py-2 text-xs text-slate-500 sm:text-sm">
+            <div className="flex min-h-[38px] flex-1 items-center rounded-xl border border-yellow-300 bg-white px-2.5 py-1.5 text-xs text-slate-500">
               수식 입력기를 준비하는 중...
             </div>
           )}
         </div>
       )}
-      <div className="flex flex-wrap gap-2">
+      <div className="flex flex-wrap gap-1.5">
         {mathPadTokens.map((token) => (
           <button
             key={token}
             type="button"
             onClick={() => insertMathToken(token)}
             disabled={isStepJudged}
-            className="rounded-xl border border-blue-300 bg-blue-50 px-3 py-2 text-sm font-bold text-blue-800 transition hover:bg-blue-100 sm:text-base"
+            className="rounded-lg border border-blue-300 bg-blue-50 px-2.5 py-1.5 text-xs font-bold text-blue-800 transition hover:bg-blue-100 sm:text-sm"
           >
             {token}
           </button>
@@ -1349,7 +1361,6 @@ export default function TrainingMode({
       return next
     })
     setAnswerCheckState('wrong')
-    setSuccessMessage('')
     return nextWrongStreak
   }
 
@@ -1362,7 +1373,6 @@ export default function TrainingMode({
     revealedStudentAnswerByStepRef.current[stepIdx] = studentAnswerBeforeReveal
     if (!isChoiceStep && revealedAnswer) setTextAnswer(revealedAnswer)
     setAnswerCheckState('revealed')
-    setSuccessMessage('정답이 공개되었습니다. 아래에서 다음 단계로 진행해 주세요.')
     setWrongAttemptStreak(0)
     const triggerMessage = usedHintAtCurrentStep ? '힌트 사용 후 오답 2회' : '힌트 미사용 오답 3회'
     showSimpleNoticeDialog('안내', triggerMessage + '로 정답을 제공합니다.\n정답: ' + (revealedAnswer || '정답 정보 없음'))
@@ -1383,7 +1393,6 @@ export default function TrainingMode({
       })
     ) {
       setAnswerCheckState('correct')
-      setSuccessMessage(POSITIVE_FEEDBACK[stepIdx % POSITIVE_FEEDBACK.length])
       setWrongAttemptStreak(0)
       window.setTimeout(
         () =>
@@ -1403,7 +1412,7 @@ export default function TrainingMode({
   const renderStepFocusedLearningCta = () => {
     if (!showStepFocusedLearningButton) return null
     return (
-      <div className="mt-2 mb-0 flex flex-col items-start gap-1 rounded-lg border border-violet-100/90 bg-violet-50/40 px-2.5 pb-1 pt-1.5">
+      <div className="mt-2 mb-1 flex flex-wrap items-center gap-2 rounded-lg border border-violet-100/90 bg-violet-50/40 px-2.5 py-2">
         <button
           type="button"
           className={stepFocusedLearningButtonClass}
@@ -1411,7 +1420,7 @@ export default function TrainingMode({
         >
           💡 어려우면 먼저 학습해보기
         </button>
-        <p className="w-full text-left text-[0.9375rem] font-medium leading-snug text-slate-800/90">
+        <p className="min-w-0 flex-1 text-left text-sm font-medium leading-snug text-slate-800/90 sm:text-[0.9375rem]">
           개념 설명과 연습문제를 먼저 학습할 수 있어요.
         </p>
       </div>
@@ -1457,11 +1466,11 @@ export default function TrainingMode({
           {renderTextWithFractions(questionText, `question-${problemIdx}-${stepIdx}`)}
         </p>
         {renderStepFocusedLearningCta()}
-        <div className="space-y-1.5">
-        <label className="mb-0 block text-sm font-black text-violet-950">답 입력</label>
+        <div className="mt-1 space-y-2">
+        <label className="block text-sm font-black leading-normal text-violet-950">답 입력</label>
         {isNumericXValueStep ? (
           <div className="flex items-stretch gap-2">
-            <span className="inline-flex items-center rounded-xl border border-yellow-300 bg-yellow-50 px-3 py-2 text-base font-black text-slate-800">
+            <span className="inline-flex items-center rounded-xl border border-yellow-300 bg-yellow-50 px-2.5 py-1.5 text-sm font-black text-slate-800">
               x=
             </span>
             <input
@@ -1475,9 +1484,8 @@ export default function TrainingMode({
                 const next = event.target.value.replace(/[^0-9.\-]/g, '')
                 setTextAnswer(next)
                 setAnswerCheckState('')
-                setSuccessMessage('')
               }}
-              className="flex-1 rounded-xl border border-yellow-300 bg-white px-3 py-2 text-base text-slate-900 outline-none focus:border-amber-400 focus:ring-2 focus:ring-amber-200"
+              className="flex-1 rounded-xl border border-yellow-300 bg-white px-2.5 py-1.5 text-sm text-slate-900 outline-none focus:border-amber-400 focus:ring-2 focus:ring-amber-200"
               placeholder="숫자만 입력"
             />
           </div>
@@ -1504,7 +1512,6 @@ export default function TrainingMode({
     if (isFinalStepLocked) return
     if (canAdvance) {
       setAnswerCheckState('correct')
-      setSuccessMessage(POSITIVE_FEEDBACK[stepIdx % POSITIVE_FEEDBACK.length])
       setWrongAttemptStreak(0)
       console.log('[step] completed:', true)
       window.setTimeout(() => {
@@ -1626,7 +1633,6 @@ export default function TrainingMode({
         return next
       })
       setAnswerCheckState('wrong')
-      setSuccessMessage('')
       return
     }
     const capturedAnswerOnReveal = revealedStudentAnswerByStepRef.current[stepIdx]
@@ -1688,7 +1694,6 @@ export default function TrainingMode({
       setSelectedChoiceToken('')
       setBlankValues({})
       setTextAnswer('')
-      setSuccessMessage('')
       setAnswerCheckState('')
       setWrongAttemptStreak(0)
       setActiveBlankKey('')
@@ -1750,18 +1755,21 @@ export default function TrainingMode({
       problemMeta: {
         code: problemCode,
         type: trainingType,
-        context: String(row?.['문제 텍스트'] ?? '').trim(),
+        problemPrinciple: String(row?.problemPrinciple ?? '').trim(),
+        problemStrategy: String(row?.problemStrategy ?? '').trim(),
       },
+      problemPrinciple: String(row?.problemPrinciple ?? '').trim(),
+      problemStrategy: String(row?.problemStrategy ?? '').trim(),
+      ...stepAnswerPayload,
       steps: nextCompletedSteps.map((item, i) => ({
         index: i + 1,
         meaning: TRAINING_STEP_MEANINGS[i] || '',
-        question: item.question,
-        correctAnswer: item.correctAnswer,
-        studentAnswer: item.answer,
         isCorrect: Number(item.processResult) > 0,
       })),
       total: successCount,
       fail_count: failCount,
+      type: trainingType,
+      status: resolveTrainingSaveStatus(trainingType, failCount),
       hint: hintUsageCount,
     }
 
@@ -1769,19 +1777,10 @@ export default function TrainingMode({
     if (!alreadySaved) {
       setIsAwaitingTrainingAi(true)
       try {
-        const aiRes = await postGenerateAiFeedback(aiPayload)
-        if (aiRes?.ok) {
-          aiFeedbackText = String(aiRes.feedback ?? '').trim()
-          if (!aiFeedbackText) {
-            aiFeedbackText = buildShortCoachingFeedback('', aiPayload)
-          }
-        } else {
-          console.warn('[TrainingMode] AI feedback network/deployment issue', aiRes?.reason || aiRes)
-          aiFeedbackText = buildLocalTrainingAiFallback(failCount, aiPayload)
-        }
+        aiFeedbackText = await generateStudentFeedback(aiPayload, { post: postGenerateAiFeedback })
       } catch (err) {
         console.warn('[TrainingMode] AI feedback fetch failed', err)
-        aiFeedbackText = buildLocalTrainingAiFallback(failCount, aiPayload)
+        aiFeedbackText = await generateStudentFeedback(aiPayload)
       } finally {
         setIsAwaitingTrainingAi(false)
       }
@@ -1809,11 +1808,13 @@ export default function TrainingMode({
         window.alert('저장에 실패했습니다. 다시 시도해주세요.')
         return
       }
-      setTrainingAiFeedback(aiFeedbackText)
     } else {
-      aiFeedbackText = buildLocalTrainingAiFallback(failCount, aiPayload)
-      setTrainingAiFeedback(aiFeedbackText)
+      aiFeedbackText =
+        savedAiFeedbackByKeyRef.current[saveKey] ||
+        getStudentFeedbackDisplayText(trainingAiFeedback)
     }
+    savedAiFeedbackByKeyRef.current[saveKey] = aiFeedbackText
+    setTrainingAiFeedback(aiFeedbackText)
     setPendingSavePayload(null)
     setIsResultReady(false)
     setIsSaved(true)
@@ -1825,6 +1826,9 @@ export default function TrainingMode({
         hintUsageCount,
         problemCode,
         trainingType,
+        successCount,
+        failCount,
+        awardedCard: awardedCard,
       }),
     )
     setIsResultView(true)
@@ -1916,7 +1920,6 @@ export default function TrainingMode({
     stepHintUsedRef.current = emptyStepFlags()
     setBlankValues({})
     setTextAnswer('')
-    setSuccessMessage('')
     setAnswerCheckState('')
     setActiveBlankKey('')
     blankInputRefs.current = {}
@@ -1973,7 +1976,7 @@ export default function TrainingMode({
   const submitAnswerButtonClass =
     'rounded-xl border border-blue-300 bg-white px-4 py-2 text-sm font-bold text-blue-800 shadow-sm transition hover:bg-blue-50 hover:shadow-[0_3px_10px_rgba(37,99,235,0.14)] active:translate-y-px'
   const stepFocusedLearningButtonClass =
-    'step-learning-cta-glow step-learning-cta-btn inline-flex max-w-full items-center justify-center rounded-lg bg-violet-600 px-3 py-1.5 text-sm font-bold leading-tight text-white shadow-md shadow-violet-600/40 hover:bg-violet-700 active:translate-y-px sm:px-3.5'
+    'step-learning-cta-glow step-learning-cta-btn inline-flex max-w-full shrink-0 items-center justify-center rounded-lg bg-violet-600 px-3 py-[calc(0.375rem*1.1)] text-sm font-bold leading-tight text-white shadow-md shadow-violet-600/40 hover:bg-violet-700 active:translate-y-px sm:px-3.5'
   const accentButtonClass =
     'rounded-xl bg-gradient-to-r from-yellow-400 to-amber-500 px-5 py-2.5 text-sm font-bold text-slate-900 shadow-lg shadow-yellow-500/30 transition hover:brightness-105 active:translate-y-px disabled:cursor-not-allowed disabled:opacity-45'
   const textInputClass =
@@ -1998,7 +2001,6 @@ export default function TrainingMode({
     stepHintUsedRef.current = emptyStepFlags()
     setBlankValues({})
     setTextAnswer('')
-    setSuccessMessage('')
     setAnswerCheckState('')
     setActiveBlankKey('')
     blankInputRefs.current = {}
@@ -2033,6 +2035,29 @@ export default function TrainingMode({
     },
     [rows]
   )
+
+  const resultOutcomeCard = useMemo(() => {
+    if (!isResultView) return null
+    const steps = resultDisplay.completedSteps || []
+    const successCount = Number(resultDisplay.successCount) || 0
+    const failCount = Number(resultDisplay.failCount) || 0
+    const statusLabel =
+      resultDisplay.status === '성공' || String(resultDisplay.status).toLowerCase() === 'success'
+        ? '성공'
+        : resultDisplay.status === '실패' || String(resultDisplay.status).toLowerCase() === 'fail'
+          ? '실패'
+          : failCount === 0
+            ? '성공'
+            : '실패'
+    return {
+      successCount,
+      failCount,
+      statusLabel,
+      feedback: getStudentFeedbackDisplayText(trainingAiFeedback),
+      hasFeedback: Boolean(String(trainingAiFeedback || '').trim()),
+      stepCount: resultDisplay.activeStepCount || steps.length,
+    }
+  }, [isResultView, resultDisplay, trainingAiFeedback])
 
   const showTrainingProblemBody = trainingSessionActive || isResultView
   const keywordCardsEnabled =
@@ -2498,94 +2523,201 @@ export default function TrainingMode({
       ) : (
         <>
       <div className="mt-3 mb-4 flex flex-wrap items-center gap-x-2 gap-y-1 rounded-2xl border border-blue-100 bg-blue-50/90 px-3 py-2.5 text-sm font-semibold text-slate-800 sm:mt-4 sm:mb-5 sm:px-4 sm:text-base">
-        <p>{resultDisplay.summary}</p>
-        <span className="font-semibold text-slate-600">
-          힌트 사용 {resultDisplay.hintUsageCount}회
-        </span>
+        {isResultView ? (
+          <>
+            <p className="text-base font-black text-violet-950 sm:text-lg">수련 완료</p>
+            <p className="mt-0.5 w-full font-semibold text-slate-600">{resultDisplay.summary}</p>
+          </>
+        ) : (
+          <>
+            <p>{resultDisplay.summary}</p>
+            <span className="font-semibold text-slate-600">
+              힌트 사용 {resultDisplay.hintUsageCount}회
+            </span>
+          </>
+        )}
       </div>
-      <div className="mt-4 rounded-2xl border border-amber-200 bg-amber-50/80 p-3 sm:p-4">
-        <p className="text-xs font-semibold uppercase text-amber-800">문제 텍스트</p>
-        <p className="mt-2 whitespace-pre-wrap text-sm leading-relaxed text-slate-800 sm:text-base">
-          {renderTextWithFractions(
-            resultDisplay.problemText,
-            `problem-text-${resultDisplay.problemCode || problemIdx}`,
-          )}
-        </p>
-      </div>
+      {isResultView && resultOutcomeCard ? (
+        <section
+          className="mt-4 rounded-3xl border-2 border-violet-300 bg-gradient-to-br from-white via-violet-50/90 to-indigo-50/80 p-4 shadow-lg shadow-violet-200/40 sm:p-6"
+          aria-labelledby="training-result-summary-title"
+        >
+          <p
+            id="training-result-summary-title"
+            className="text-center text-lg font-black tracking-tight text-violet-950 sm:text-xl"
+          >
+            수련 결과
+          </p>
+          <dl className="mt-4 grid grid-cols-2 gap-3 sm:mt-5 sm:grid-cols-3 lg:grid-cols-5">
+            <div className="rounded-xl border border-blue-200 bg-white/90 px-3 py-2.5 text-center">
+              <dt className="text-[11px] font-semibold uppercase tracking-wide text-blue-700">성공 단계</dt>
+              <dd className="mt-1 text-2xl font-black tabular-nums text-blue-950">
+                {resultOutcomeCard.successCount}
+              </dd>
+            </div>
+            <div className="rounded-xl border border-rose-200 bg-white/90 px-3 py-2.5 text-center">
+              <dt className="text-[11px] font-semibold uppercase tracking-wide text-rose-700">실패 단계</dt>
+              <dd className="mt-1 text-2xl font-black tabular-nums text-rose-950">
+                {resultOutcomeCard.failCount}
+              </dd>
+            </div>
+            <div className="rounded-xl border border-slate-200 bg-white/90 px-3 py-2.5 text-center">
+              <dt className="text-[11px] font-semibold uppercase tracking-wide text-slate-600">전체 단계</dt>
+              <dd className="mt-1 text-2xl font-black tabular-nums text-slate-900">
+                {resultOutcomeCard.stepCount}
+              </dd>
+            </div>
+            <div className="rounded-xl border border-violet-200 bg-white/90 px-3 py-2.5 text-center">
+              <dt className="text-[11px] font-semibold uppercase tracking-wide text-violet-700">결과</dt>
+              <dd className="mt-1 text-lg font-black text-violet-950">{resultOutcomeCard.statusLabel}</dd>
+            </div>
+            <div className="rounded-xl border border-amber-200 bg-white/90 px-3 py-2.5 text-center">
+              <dt className="text-[11px] font-semibold uppercase tracking-wide text-amber-800">힌트</dt>
+              <dd className="mt-1 text-2xl font-black tabular-nums text-amber-950">
+                {Number(resultDisplay.hintUsageCount) || 0}
+              </dd>
+            </div>
+          </dl>
+          <div className="mt-5 rounded-2xl border-2 border-indigo-300/80 bg-white/95 px-4 py-4 shadow-inner sm:px-5 sm:py-5">
+            <p className="text-sm font-black text-indigo-800 sm:text-base">보리도사의 학습 피드백</p>
+            {resultOutcomeCard.hasFeedback ? (
+              <p className="mt-3 whitespace-pre-wrap text-base leading-relaxed text-slate-800 sm:text-lg">
+                {resultOutcomeCard.feedback}
+              </p>
+            ) : (
+              <p className="mt-3 text-sm text-slate-500">피드백을 불러오는 중이거나 아직 없습니다.</p>
+            )}
+          </div>
+          <div className="mt-6 flex flex-col gap-4 sm:flex-row sm:flex-wrap sm:items-start">
+            <div className="flex min-w-0 flex-col gap-2">
+              <button type="button" onClick={handleBackToCardBoard} className={accentButtonClass}>
+                카드 화면으로 돌아가기
+              </button>
+              <p className="flex items-start gap-1.5 text-[calc(0.875rem*1.1)] font-medium leading-snug text-slate-700">
+                <span className="mt-px shrink-0 text-[0.92em] opacity-45" aria-hidden>
+                  🎴
+                </span>
+                <span>다음 수련 문제는 카드 화면에서 선택해 주세요.</span>
+              </p>
+            </div>
+            {allFifteenTrainingCodesComplete ? (
+              <button type="button" onClick={() => transitionToTrainingComplete()} className={softButtonClass}>
+                세트 수련 완료 보기
+              </button>
+            ) : null}
+          </div>
+        </section>
+      ) : null}
+      {String(resultDisplay.problemText || '').trim() ? (
+        <div className="mt-4 rounded-2xl border border-amber-200 bg-amber-50/80 p-3 sm:p-4">
+          <p className="text-xs font-semibold uppercase text-amber-800">문제 텍스트</p>
+          <p className="mt-2 whitespace-pre-wrap text-sm leading-relaxed text-slate-800 sm:text-base">
+            {renderTextWithFractions(
+              resultDisplay.problemText,
+              `problem-text-${resultDisplay.problemCode || problemIdx}`,
+            )}
+          </p>
+        </div>
+      ) : null}
 
       <div className="mt-5 rounded-2xl border border-blue-100 bg-blue-50/60 p-3 sm:mt-6 sm:p-5">
-        <div className="max-h-[min(72vh,760px)] overflow-y-auto pr-1 sm:max-h-[min(85vh,880px)]">
-          {resultDisplay.completedSteps.map((item) => (
-            <div key={`completed-${item.stepNumber}`} className="mb-3 rounded-2xl border border-blue-200 bg-white p-3 sm:mb-4 sm:p-4">
-              <div className="flex flex-wrap items-center gap-2 sm:gap-3">
-                <span className="rounded-full bg-blue-600 px-3 py-1 text-xs font-bold text-white">
-                  수련 {item.displayStepNumber ?? item.stepNumber} /{' '}
-                  {item.totalActiveSteps ?? resultDisplay.activeStepCount}
-                </span>
-                <span className="text-sm font-extrabold text-slate-700 sm:text-base">{item.label}</span>
-                <span
-                  className={[
-                    'rounded-full px-2.5 py-1 text-xs font-bold',
-                    Number(item.processResult) > 0
-                      ? 'bg-emerald-100 text-emerald-700'
-                      : 'bg-rose-100 text-rose-700',
-                  ].join(' ')}
+        {isResultView ? (
+          <details className="group rounded-xl border border-blue-200/80 bg-white/60 open:shadow-sm">
+            <summary className="cursor-pointer list-none px-3 py-3 text-sm font-bold text-blue-900 marker:content-none sm:px-4 sm:text-base [&::-webkit-details-marker]:hidden">
+              <span className="flex items-center justify-between gap-2">
+                단계별 풀이 보기 ({resultDisplay.activeStepCount}단계)
+                <span className="text-xs font-semibold text-blue-600 group-open:hidden">펼치기</span>
+                <span className="hidden text-xs font-semibold text-blue-600 group-open:inline">접기</span>
+              </span>
+            </summary>
+            <div className="max-h-[min(50vh,520px)] overflow-y-auto border-t border-blue-100 px-1 pb-3 pr-1 pt-2 sm:px-2">
+              {resultDisplay.completedSteps.map((item) => (
+                <div
+                  key={`completed-${item.stepNumber}`}
+                  className="mb-3 rounded-2xl border border-blue-200 bg-white p-3 last:mb-0 sm:mb-4 sm:p-4"
                 >
-                  {Number(item.processResult) > 0 ? '성공' : '실패'}
-                </span>
-              </div>
-              <p className="mt-2 whitespace-pre-wrap text-sm text-slate-800 sm:mt-3 sm:text-base">
-                {renderTextWithFractions(item.question, `history-question-${item.stepNumber}`)}
-              </p>
-              <div className="mt-2 grid gap-2 sm:grid-cols-2">
-                <div>
-                  <p className="text-xs font-semibold text-blue-700 sm:text-sm">정답:</p>
-                  <p className="mt-1 whitespace-pre-wrap rounded-md border border-blue-200 bg-blue-50 px-2 py-1 text-sm text-blue-900">
-                    {renderTextWithFractions(item.correctAnswer, `history-correct-${item.stepNumber}`)}
+                  <div className="flex flex-wrap items-center gap-2 sm:gap-3">
+                    <span className="rounded-full bg-blue-600 px-3 py-1 text-xs font-bold text-white">
+                      수련 {item.displayStepNumber ?? item.stepNumber} /{' '}
+                      {item.totalActiveSteps ?? resultDisplay.activeStepCount}
+                    </span>
+                    <span className="text-sm font-extrabold text-slate-700 sm:text-base">{item.label}</span>
+                    <span
+                      className={[
+                        'rounded-full px-2.5 py-1 text-xs font-bold',
+                        Number(item.processResult) > 0
+                          ? 'bg-emerald-100 text-emerald-700'
+                          : 'bg-rose-100 text-rose-700',
+                      ].join(' ')}
+                    >
+                      {Number(item.processResult) > 0 ? '성공' : '실패'}
+                    </span>
+                  </div>
+                  <p className="mt-2 whitespace-pre-wrap text-sm text-slate-800 sm:mt-3 sm:text-base">
+                    {renderTextWithFractions(item.question, `history-question-${item.stepNumber}`)}
                   </p>
+                  <div className="mt-2 grid gap-2 sm:grid-cols-2">
+                    <div>
+                      <p className="text-xs font-semibold text-blue-700 sm:text-sm">정답:</p>
+                      <p className="mt-1 whitespace-pre-wrap rounded-md border border-blue-200 bg-blue-50 px-2 py-1 text-sm text-blue-900">
+                        {renderTextWithFractions(item.correctAnswer, `history-correct-${item.stepNumber}`)}
+                      </p>
+                    </div>
+                    <div>
+                      <p className="text-xs font-semibold text-emerald-700 sm:text-sm">입력한 답:</p>
+                      <p className="mt-1 whitespace-pre-wrap rounded-md border border-emerald-200 bg-emerald-50 px-2 py-1 text-sm text-emerald-900">
+                        {String(item.answer ?? '').trim()
+                          ? renderTextWithFractions(item.answer, `history-answer-${item.stepNumber}`)
+                          : '미입력'}
+                      </p>
+                    </div>
+                  </div>
                 </div>
-                <div>
-                  <p className="text-xs font-semibold text-emerald-700 sm:text-sm">입력한 답:</p>
-                  <p className="mt-1 whitespace-pre-wrap rounded-md border border-emerald-200 bg-emerald-50 px-2 py-1 text-sm text-emerald-900">
-                    {String(item.answer ?? '').trim()
-                      ? renderTextWithFractions(item.answer, `history-answer-${item.stepNumber}`)
-                      : '미입력'}
-                  </p>
-                </div>
-              </div>
+              ))}
             </div>
-          ))}
-          {isResultView ? (
-            <div className="mt-4 space-y-3">
-              <p className="text-sm font-bold text-blue-800">
-                {resultDisplay.activeStepCount}단계 수련을 모두 마쳤습니다.
-              </p>
-              {String(trainingAiFeedback || '').trim() ? (
-                <div className="rounded-2xl border border-indigo-200 bg-indigo-50/90 px-4 py-3 text-left shadow-inner sm:px-5 sm:py-4">
-                  <p className="text-xs font-semibold uppercase tracking-wide text-indigo-700">보리도사의 꿀팁</p>
-                  <p className="mt-2 whitespace-pre-wrap text-sm leading-relaxed text-slate-800 sm:text-base">
-                    {formatStudentAiFeedbackForDisplay(
-                      trainingAiFeedback,
-                      resultDisplay.problemText,
-                    )}
-                  </p>
+          </details>
+        ) : (
+          <div className="max-h-[min(72vh,760px)] overflow-y-auto pr-1 sm:max-h-[min(85vh,880px)]">
+            {resultDisplay.completedSteps.map((item) => (
+              <div key={`completed-${item.stepNumber}`} className="mb-3 rounded-2xl border border-blue-200 bg-white p-3 sm:mb-4 sm:p-4">
+                <div className="flex flex-wrap items-center gap-2 sm:gap-3">
+                  <span className="rounded-full bg-blue-600 px-3 py-1 text-xs font-bold text-white">
+                    수련 {item.displayStepNumber ?? item.stepNumber} /{' '}
+                    {item.totalActiveSteps ?? resultDisplay.activeStepCount}
+                  </span>
+                  <span className="text-sm font-extrabold text-slate-700 sm:text-base">{item.label}</span>
+                  <span
+                    className={[
+                      'rounded-full px-2.5 py-1 text-xs font-bold',
+                      Number(item.processResult) > 0
+                        ? 'bg-emerald-100 text-emerald-700'
+                        : 'bg-rose-100 text-rose-700',
+                    ].join(' ')}
+                  >
+                    {Number(item.processResult) > 0 ? '성공' : '실패'}
+                  </span>
                 </div>
-              ) : null}
-              <div className="flex flex-col gap-3 sm:flex-row sm:flex-wrap">
-                <button type="button" onClick={handleBackToCardBoard} className={accentButtonClass}>
-                  카드 화면으로 돌아가기
-                </button>
-                {allFifteenTrainingCodesComplete ? (
-                  <button type="button" onClick={() => transitionToTrainingComplete()} className={softButtonClass}>
-                    세트 수련 완료 보기
-                  </button>
-                ) : null}
+                <p className="mt-2 whitespace-pre-wrap text-sm text-slate-800 sm:mt-3 sm:text-base">
+                  {renderTextWithFractions(item.question, `history-question-${item.stepNumber}`)}
+                </p>
+                <div className="mt-2 grid gap-2 sm:grid-cols-2">
+                  <div>
+                    <p className="text-xs font-semibold text-blue-700 sm:text-sm">정답:</p>
+                    <p className="mt-1 whitespace-pre-wrap rounded-md border border-blue-200 bg-blue-50 px-2 py-1 text-sm text-blue-900">
+                      {renderTextWithFractions(item.correctAnswer, `history-correct-${item.stepNumber}`)}
+                    </p>
+                  </div>
+                  <div>
+                    <p className="text-xs font-semibold text-emerald-700 sm:text-sm">입력한 답:</p>
+                    <p className="mt-1 whitespace-pre-wrap rounded-md border border-emerald-200 bg-emerald-50 px-2 py-1 text-sm text-emerald-900">
+                      {String(item.answer ?? '').trim()
+                        ? renderTextWithFractions(item.answer, `history-answer-${item.stepNumber}`)
+                        : '미입력'}
+                    </p>
+                  </div>
+                </div>
               </div>
-              <p className="text-sm text-slate-600">
-                다음 수련 문제는 카드 화면에서 선택해 주세요.
-              </p>
-            </div>
-          ) : (
+            ))}
             <>
               {!isAwaitingResultSave && !isFinalStepLocked && (
                 <>
@@ -2597,9 +2729,7 @@ export default function TrainingMode({
                   </div>
                   <div className="mt-4">{renderQuestionBody()}</div>
                   {answerCheckState === 'correct' && (
-                    <p className="mt-3 text-sm font-semibold text-emerald-700">
-                      정답입니다!
-                    </p>
+                    <p className="mt-3 text-sm font-semibold text-emerald-700">정답입니다!</p>
                   )}
                   {answerCheckState === 'wrong' && (
                     <p className="mt-3 text-sm font-semibold text-rose-700">
@@ -2630,8 +2760,8 @@ export default function TrainingMode({
                 </div>
               ) : null}
             </>
-          )}
-        </div>
+          </div>
+        )}
       </div>
         </>
       )}

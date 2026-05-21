@@ -4,7 +4,7 @@
  *
  * 시트 열(1행 헤더 가정):
  * A nickname, B classCode, C level, D diag_score, E diag_time,
- * F problem, G type, H timestamp, I~N step1~step6, O total, P hint, Q status, R ai
+ * F problem, G type, H timestamp, I~P step1~step6(+5_1,5_2,5_3), Q total, R fail_count, S hint, T status, U ai
  *
  * 교사 클래스 목록: 시트 이름 "classes" (대소문자 무시 매칭)
  *   1행 헤더 예: teacherEmail | classCode | className | createdAt
@@ -229,10 +229,10 @@ function getDefaultLearnerColMap_() {
     step5_3: 14,
     step6: 15,
     total: 16,
-    hint: 17,
-    status: 18,
-    ai: 19,
-    fail_count: 20,
+    fail_count: 17,
+    hint: 18,
+    status: 19,
+    ai: 20,
   };
 }
 
@@ -275,7 +275,7 @@ function getLearnerSheetColumnMap_(headerRow) {
     else if (key === 'total' || key === '점수') map.total = c;
     else if (key === 'hint' || key === '힌트') map.hint = c;
     else if (key === 'status' || key === '상태') map.status = c;
-    else if (key === 'ai') map.ai = c;
+    else if (key === 'ai' || key === 'aifeedback' || key === '피드백') map.ai = c;
     else if (key === 'failcount' || key === 'fail_count') map.fail_count = c;
   }
   return map;
@@ -361,7 +361,7 @@ function formatTimestampFieldForJson_(v) {
 
 /**
  * 시트 한 행(2행부터) → 객체.
- * 신규: I~P step1~step6(+5_1,5_2,5_3), Q total, R hint, S status, T ai, U fail_count
+ * 신규: I~P step1~step6(+5_1,5_2,5_3), Q total, R fail_count, S hint, T status, U ai
  * 레거시(열 16개 이하): I~N step1~step6(6칸), O total, …
  * @param {Array} row getValues() 행
  * @param {Array=} displayRow getDisplayValues() 행 (timestamp 보강)
@@ -1506,7 +1506,11 @@ function handleAiFeedbackGet_(p) {
       try {
         var jsonStr0 = Utilities.newBlob(Utilities.base64Decode(raw)).getDataAsString('UTF-8');
         var ob0 = JSON.parse(jsonStr0);
-        if (ob0.problemMeta && Array.isArray(ob0.steps)) {
+        if (
+          (ob0.v === 4 && ob0.analysis) ||
+          (ob0.analysis && typeof ob0.analysis === 'object') ||
+          (ob0.problemMeta && Array.isArray(ob0.steps))
+        ) {
           var textV3 = generateAIFeedback_(ob0);
           return { ok: true, feedback: textV3 };
         }
@@ -1862,9 +1866,13 @@ function compactStudentFeedback_(rawText, ctx) {
   var chunks = splitFeedbackSentences_(text);
   var scored = [];
   var i;
+  var stratBoost = String(ctx.problemStrategy || '').trim();
+  var princBoost = String(ctx.problemPrinciple || '').trim();
   for (i = 0; i < chunks.length; i += 1) {
     var c = chunks[i];
     var n = scoreMathHintSentence_(c);
+    if (stratBoost && c.indexOf(stratBoost.slice(0, Math.min(12, stratBoost.length))) >= 0) n += 14;
+    if (princBoost && c.indexOf(princBoost.slice(0, Math.min(10, princBoost.length))) >= 0) n += 6;
     scored.push({ s: c, n: n, cheer: isGenericCheerSentence_(c) });
   }
 
@@ -1949,8 +1957,13 @@ function buildStrictBoriFeedback_(ctx, rawText) {
 
   var hint1 = '조건을 식으로 한 줄씩 바로 바꿔 써보자';
   var hint2 = '숫자부터 계산하지 말고, 관계식 먼저 적고 정리해보자';
-
-  if (/두\s*자리|자릿수|십의\s*자리|일의\s*자리/.test(src)) {
+  var csvStrategy = String(ctx.problemStrategy || '').trim();
+  var csvPrinciple = String(ctx.problemPrinciple || '').trim();
+  var teacherHint = rewriteToTeacherStrategyHintGAS_(csvStrategy, csvPrinciple, null);
+  if (teacherHint) {
+    hint1 = teacherHint.replace(/\.\s*$/, '');
+    hint2 = '한 줄씩 식을 정리해보자';
+  } else if (/두\s*자리|자릿수|십의\s*자리|일의\s*자리/.test(src)) {
     hint1 = '두 자리 수는 10x+a 꼴로 먼저 놓고 식을 세워보자';
     hint2 = '예를 들어 십의 자리가 x, 일의 자리가 4면 10x+4처럼 쓰면 돼';
   } else if (/연속|연이어|다음\s*수|연속하는/.test(src)) {
@@ -2017,9 +2030,56 @@ function newPayloadToContext_(pl) {
     problem: String(meta.code != null ? meta.code : '').trim(),
     trainingType: String(meta.type != null ? meta.type : '').trim(),
     problemText: String(meta.context != null ? meta.context : '').trim(),
+    problemPrinciple: String(
+      meta.problemPrinciple != null ? meta.problemPrinciple : payload.problemPrinciple || ''
+    ).trim(),
+    problemStrategy: String(
+      meta.problemStrategy != null ? meta.problemStrategy : payload.problemStrategy || ''
+    ).trim(),
     total: total,
     hint: hint,
     steps: steps,
+  };
+}
+
+var ADMIN_SECTION_MAX_CHARS_GAS_ = 96;
+
+function compactAdminAnalysisLineGAS_(text, maxLen) {
+  var max = maxLen != null ? maxLen : ADMIN_SECTION_MAX_CHARS_GAS_;
+  var t = String(text || '')
+    .replace(/\r/g, ' ')
+    .replace(/\n+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  if (!t) return '';
+  t = t
+    .replace(/평균\s*점수는\s*[\d.]+\s*점으로\s*상대적으로/g, '')
+    .replace(/해당\s*유형을\s*우선\s*보강할\s*필요가\s*있습니다/g, '보강 필요')
+    .replace(/필요가\s*있습니다/g, '필요')
+    .replace(/보입니다/g, '확인됨')
+    .replace(/보여\s*줍니다/g, '확인됨')
+    .replace(/것으로\s*보입니다/g, '')
+    .replace(/것을\s*추천합니다/g, '권장')
+    .replace(/진행해\s*주세요/g, '권장')
+    .replace(/,\s*,/g, ',')
+    .replace(/\s+/g, ' ')
+    .trim();
+  if (t.length > max) {
+    var cut = t.slice(0, max - 1).replace(/\s+\S*$/, '').trim();
+    t = cut || t.slice(0, max - 1);
+  }
+  if (t && !/[.!?]$/.test(t)) t += '.';
+  return t;
+}
+
+function compactAdminAnalysisSectionsGAS_(sections) {
+  var s = sections || {};
+  return {
+    learningTrend: compactAdminAnalysisLineGAS_(s.learningTrend),
+    majorDifficulty: compactAdminAnalysisLineGAS_(s.majorDifficulty),
+    misconception: compactAdminAnalysisLineGAS_(s.misconception),
+    teachingGuide: compactAdminAnalysisLineGAS_(s.teachingGuide),
+    recommendedActivities: compactAdminAnalysisLineGAS_(s.recommendedActivities),
   };
 }
 
@@ -2049,22 +2109,19 @@ function generateAdminProblemAnalysis_(payload) {
   };
 
   var userBlock =
-    '역할: 중학교 수학(일차방정식) 클래스의 수련 결과를 해석하는 교육 데이터 분석 보조.\n' +
-    '아래 JSON은 한 클래스에서 문제 코드 [' +
+    '역할: 중학교 일차방정식 수업 담당 교사의 문제별 분석 메모 작성.\n' +
+    '문제 코드 [' +
     problem +
-    ']에 대한 유형별 집계와 일부 학습 기록이다.\n\n' +
+    '] 집계 JSON:\n\n' +
     JSON.stringify(compact, null, 2) +
-    '\n\n요구: 반드시 유효한 JSON 객체 하나만 출력. 마크다운·코드펜스·설명 문장 금지.\n' +
-    '키 다섯 개(모두 문자열): learningTrend, majorDifficulty, misconception, teachingGuide, recommendedActivities.\n' +
-    'learningTrend: 유형 간 평균·편차 등 학습 경향을 2~4문장.\n' +
-    'majorDifficulty: 어려움이 큰 유형·실패 패턴을 2~4문장.\n' +
-    'misconception: 추정되는 오개념·개념 공백을 2~4문장.\n' +
-    'teachingGuide: 수업·보충 지도 순서를 2~4문장.\n' +
-    'recommendedActivities: 학생 활동·추가 연습 제안을 2~4문장.\n' +
-    '입력에 없는 수치는 지어내지 말고, 데이터가 부족하면 그 사실을 한 줄로 밝힌다.';
+    '\n\n출력: JSON 객체 하나. 키: learningTrend, majorDifficulty, misconception, teachingGuide, recommendedActivities.\n' +
+    '【톤】 교사용 수업 메모. 필드당 1~2문장, 40~80자. 명사형·간결체(~확인됨, ~높음, ~필요, ~권장). 해요체·학생 격려 금지.\n' +
+    '장문 설명("평균 점수는 X점으로…") 금지. 수치는 필드당 1개만.\n' +
+    'learningTrend: 점수·실패율 흐름. majorDifficulty: 어려운 유형·단계. misconception: 수업 핵심 개념. teachingGuide: 수업 흐름. recommendedActivities: 짧은 활동 쉼표 구분.\n' +
+    '데이터 부족 시 한 줄로만.';
 
   var system =
-    '너는 출력으로 JSON 객체만 반환한다. 한국어 값. JSON 외 텍스트 금지.';
+    'JSON만 반환. 교사용 분석 메모체. 장문·GPT 설명문 금지. 한국어.';
 
   var body = {
     model: 'gpt-4o-mini',
@@ -2072,8 +2129,8 @@ function generateAdminProblemAnalysis_(payload) {
       { role: 'system', content: system },
       { role: 'user', content: userBlock },
     ],
-    temperature: 0.35,
-    max_tokens: 2800,
+    temperature: 0.3,
+    max_tokens: 900,
     response_format: { type: 'json_object' },
   };
 
@@ -2121,7 +2178,7 @@ function generateAdminProblemAnalysis_(payload) {
     ) {
       return { ok: false, message: 'incomplete_analysis_json' };
     }
-    return { ok: true, analysis: a };
+    return { ok: true, analysis: compactAdminAnalysisSectionsGAS_(a) };
   } catch (e) {
     Logger.log('[admin_problem_analysis] parse/call ' + e);
     return { ok: false, message: String(e && e.message ? e.message : e) };
@@ -2137,48 +2194,602 @@ function stripJsonFenceForAdmin_(text) {
   return t.trim();
 }
 
+/** v4 피드백 — 단계 분석 기반 */
+var FEEDBACK_STEP_LABELS_GAS_ = {
+  step1: '무엇을 구하는지 파악',
+  step2: '미지수 설정',
+  step3: '문제 상황을 식으로 표현',
+  step4: '방정식 세우기',
+  step5_1: '식 정리',
+  step5_2: '항 이동',
+  step5_3: '계수 나누기',
+  step6: '구한 값을 문제 상황에 맞게 해석',
+};
+
+var FEEDBACK_STEP_STRATEGY_GAS_ = {
+  step1: '구하는 것을 한 줄로 적은 뒤 식으로 옮겨보자.',
+  step2: '구하는 양을 x로 정하고 끝까지 같은 문자로 써보자.',
+  step3: '문제 속 관계가 식에 모두 들어갔는지 확인해보자.',
+  step4: '방정식에 문제 조건이 모두 들어갔는지 다시 확인해보자.',
+  step5_1: '괄호 안 모든 항에 숫자가 곱해졌는지 다시 확인해보자.',
+  step5_2: '항을 옮긴 뒤 양변에 같은 항만 남았는지 확인해보자.',
+  step5_3: 'x 앞 숫자로 나누기 전에 식이 맞는지 확인해보자.',
+  step6: '구한 값을 문제 조건에 넣어 맞는지 확인해보자.',
+};
+
+var AWKWARD_FEEDBACK_RE_GAS_ =
+  /에서\s*한\s*번\s*더\s*확인보면\s*좋아요|확인보면\s*좋아요|확인해\s*보면\s*좋아요|이어가\s*보세요|같은\s*흐름으로\s*풀어보세요|도움이\s*돼|필요합니다|중요합니다|활용하(시|해)\s*바랍|나타났습니다|이해하는\s*것이/;
+
+var STUDENT_FEEDBACK_VOICE_PROMPT_GAS_ =
+  '【말투 통일】 중1 수학 선생님이 옆에서 짧게 말하는 톤. 해요체. 행동 중심(해보자·확인해보자·정리해보자·이어가 보자). success·partial·fail 같은 말투. 금지: ~필요합니다, ~중요합니다, ~활용하세요/바랍니다, 설명형, 나타났습니다.';
+
+function unifyStudentFeedbackToneGAS_(sentence) {
+  var t = String(sentence || '').replace(/\s+/g, ' ').trim();
+  if (!t) return '';
+  t = t
+    .replace(/활용하(시|해)\s*바랍니다/g, '먼저 적어보자')
+    .replace(/활용해\s*보세요/g, '먼저 적어보자')
+    .replace(/공식을\s*활용/g, '공식을 먼저 적어')
+    .replace(/관계를\s*이해하는\s*것이\s*중요합니다/g, '관계를 먼저 정리해보자')
+    .replace(/[^.!?]{0,40}이\s*중요합니다/g, '먼저 정리해보자')
+    .replace(/확인이\s*필요합니다/g, '다시 확인해보자')
+    .replace(/나타났습니다/g, '있었어요')
+    .replace(/어려움이\s*나타났/g, '어려움이 있었')
+    .replace(/연습이\s*필요합니다/g, '다시 연습해보자')
+    .replace(/([가-힣·\s]{2,24})\s*필요합니다\.?$/g, '$1 해보자.')
+    .replace(/잘했습니다/g, '안정적으로 해결했어요')
+    .replace(/점이\s*좋아요/g, '흐름이 안정적이었어요')
+    .replace(/흐름이\s*좋았어요/g, '흐름이 자연스럽게 이어졌어요')
+    .replace(/확인보면\s*좋아요/g, '확인해보자')
+    .replace(/확인해\s*보면\s*좋아요/g, '확인해보자')
+    .replace(/도움이\s*돼\.?$/g, '확인해보자.')
+    .replace(/해보세요/g, '해보자')
+    .replace(/적어보세요/g, '적어보자')
+    .replace(/세워보세요/g, '세워보자')
+    .replace(/정리하세요/g, '정리해보자');
+  if (!/[.!?]$/.test(t)) t += '.';
+  return t.replace(/\s+/g, ' ').trim();
+}
+
+function finishTeacherHintGAS_(text) {
+  var t = String(text || '').replace(/\s+/g, ' ').trim();
+  if (!t) return '';
+  if (t.length > 58) {
+    t = t.slice(0, 57).replace(/\s+\S*$/, '').trim();
+  }
+  if (!/[.!?]$/.test(t)) t += '.';
+  return t;
+}
+
+/** CSV problemStrategy → 짧은 행동 중심 교사 힌트 (프론트 mathStrategyHintTone.js 와 동기화) */
+function rewriteToTeacherStrategyHintGAS_(strategy, principle, fail) {
+  var s = String(strategy || '').trim().replace(/"/g, '');
+  var p = String(principle || '').trim();
+  var failKey = fail && fail.key ? String(fail.key) : '';
+  var src = (p + ' ' + s).replace(/\s+/g, ' ');
+
+  if (/거리|속력|시간/.test(src)) {
+    return finishTeacherHintGAS_('거리·시간·속력은 표에 적고 관계를 먼저 정리해보자');
+  }
+  if (/비율|전체.*부분|\/\d+\s*×|1\/\d/.test(src)) {
+    return finishTeacherHintGAS_('전체와 부분의 관계를 표에 먼저 적어보자');
+  }
+  if (/분배|괄호|distributive/i.test(s) || failKey === 'step5_1') {
+    return finishTeacherHintGAS_('괄호 안 모든 항에 숫자가 곱해졌는지 다시 확인해보자');
+  }
+  if (/10x\s*\+|10x\+|십의\s*자리|일의\s*자리|두\s*자리/.test(src)) {
+    return finishTeacherHintGAS_('두 자리 수는 10x+a 꼴로 적고 조건을 식으로 옮겨보자');
+  }
+  if (/x\s*\+\s*1|연속|다음\s*(자연수|수)/.test(src)) {
+    return finishTeacherHintGAS_('연속한 수는 x와 x+1로 두고 합·차를 식으로 세워보자');
+  }
+  if (/x\s*\+\s*2|홀수/.test(src)) {
+    return finishTeacherHintGAS_('작은 수를 x로 두고 다음 수는 x+2로 적어보자');
+  }
+  if (/나이|살\s*많|많으면|\+\s*\d+/.test(s) || /많다|적다/.test(p)) {
+    var pm = s.match(/\+\s*(\d+)/);
+    if (pm) {
+      return finishTeacherHintGAS_('많은 쪽은 x+' + pm[1] + ', 적은 쪽은 x로 두고 합·차 식을 세워보자');
+    }
+    return finishTeacherHintGAS_('많고 적은 쪽을 x와 x+N으로 나눠 식을 세워보자');
+  }
+  if (/다리|소|닭|양|오리|개.*다리/.test(src)) {
+    return finishTeacherHintGAS_('동물마다 다리 수를 표에 적고 다리 합 식을 세워보자');
+  }
+  if (/둘레|직사각형|가로|세로/.test(src)) {
+    return finishTeacherHintGAS_('가로·세로를 표에 적고 둘레나 넓이 식을 세워보자');
+  }
+  if (/개수\s*×|×\s*1|곱|배/.test(s)) {
+    return finishTeacherHintGAS_('개수와 한 개 값을 곱한 식으로 관계를 적어보자');
+  }
+  if (/미래|몇\s*년\s*후|현재\s*나이/.test(src)) {
+    return finishTeacherHintGAS_('지금 나이와 몇 년 뒤 나이를 x와 x+N으로 나눠 적어보자');
+  }
+  if (/주고\s*받|개수\s*변화/.test(src)) {
+    return finishTeacherHintGAS_('주고받기 전·후 개수를 표에 적고 변화를 식으로 세워보자');
+  }
+  if (/항\s*이동|move_term/i.test(s) || failKey === 'step5_2') {
+    return FEEDBACK_STEP_STRATEGY_GAS_.step5_2;
+  }
+  if (/계수|나누|divide/i.test(s) || failKey === 'step5_3') {
+    return FEEDBACK_STEP_STRATEGY_GAS_.step5_3;
+  }
+  if (failKey && FEEDBACK_STEP_STRATEGY_GAS_[failKey]) {
+    return FEEDBACK_STEP_STRATEGY_GAS_[failKey];
+  }
+  if (s) {
+    var out = s
+      .replace(/관계를\s*생각하고\s*/g, '')
+      .replace(/를\s*떠올리(고|며)?\s*/g, '')
+      .replace(/구해보자/g, '적어보자')
+      .replace(/나타내(보자|야)/g, '적어보자')
+      .replace(/생각해보자/g, '정리해보자')
+      .replace(/이다\.?$/g, '로 적어보자')
+      .replace(/\s+/g, ' ')
+      .trim();
+    if (out.length > 8) return finishTeacherHintGAS_(out);
+  }
+  if (p && /많다|적다|합|차|비/.test(p)) {
+    return finishTeacherHintGAS_('조건을 표에 적고 관계를 식으로 옮겨보자');
+  }
+  return '';
+}
+
+function isEmptyStepCell_(raw) {
+  return raw === '' || raw === null || raw === undefined;
+}
+
+function stepOutcomeFromRaw_(raw, isCorrectHint) {
+  if (isEmptyStepCell_(raw)) return 'skipped';
+  if (typeof isCorrectHint === 'boolean') {
+    return isCorrectHint ? 'success' : 'fail';
+  }
+  var n = Number(raw);
+  if (n === 1) return 'success';
+  if (n === 0) return 'fail';
+  return 'skipped';
+}
+
+function deriveOverallPerformanceLevelGAS_(failCount) {
+  var fc = Math.max(0, Math.round(Number(failCount) || 0));
+  if (fc <= 1) return 'stable';
+  if (fc <= 3) return 'partial_difficulty';
+  return 'multi_difficulty';
+}
+
+function overallPerformanceSummarySentenceGAS_(level) {
+  if (level === 'stable') return '전체 해결 흐름이 안정적이었어요.';
+  if (level === 'partial_difficulty') return '이번 문제에서는 일부 단계에서 어려움이 있었어요.';
+  return '이번 문제에서는 여러 단계에서 어려움이 있었어요.';
+}
+
+function deriveFeedbackTierGAS_(failCount, total) {
+  var fc = Math.max(0, Math.round(Number(failCount) || 0));
+  var t = Math.max(0, Math.round(Number(total) || 0));
+  if (t >= 6 && fc <= 1) return 'success';
+  if (t <= 3 || fc >= 4) return 'fail';
+  return 'partial';
+}
+
+function deriveFeedbackEmphasisGAS_(failCount, total) {
+  var tier = deriveFeedbackTierGAS_(failCount, total);
+  if (tier === 'success') return 'success';
+  if (tier === 'fail') return 'remediation';
+  return 'partial';
+}
+
+function tierOverallSummarySentenceGAS_(tier) {
+  if (tier === 'success') return '전체 해결 흐름이 안정적이었어요.';
+  if (tier === 'partial') return '전체 흐름은 자연스럽게 이어졌어요.';
+  return '이번 문제에서는 여러 단계에서 어려움이 있었어요.';
+}
+
+var REMEDIAL_TONE_RE_GAS_ =
+  /표를\s*(먼저\s*)?그려|어려움이\s*있었|특히\s*.+\s*단계에서\s*어려움|다시\s*도전|틀린\s*단계/;
+
+function isRemedialToneSentenceGAS_(sentence) {
+  return REMEDIAL_TONE_RE_GAS_.test(String(sentence || ''));
+}
+
+function pickSuccessPraiseLineGAS_(analysis) {
+  var step = analysis && analysis.primarySuccessStep;
+  var key = step && step.key ? String(step.key) : '';
+  if (key === 'step3') return '문제 조건을 정리하며 식을 세운 흐름이 안정적이었어요.';
+  if (key === 'step4') return '방정식을 차근차근 세운 흐름이 자연스럽게 이어졌어요.';
+  if (key === 'step2') return '미지수를 일관되게 두고 푼 흐름이 안정적이었어요.';
+  if (step && step.label) {
+    return String(step.label).replace(/하기$/, '').trim() + ' 흐름이 자연스럽게 이어졌어요.';
+  }
+  return '문제 조건을 정리하며 식을 세운 흐름이 안정적이었어요.';
+}
+
+function pickSuccessMaintenanceHintGAS_(analysis) {
+  var src =
+    String((analysis && analysis.problemPrinciple) || '') +
+    ' ' +
+    String((analysis && analysis.problemStrategy) || '');
+  if (/거리|속력|시간/.test(src)) {
+    return finishTeacherHintGAS_('다음 문제에서도 거리·시간·속력 관계를 정리하며 풀어보자');
+  }
+  if (/비율|전체|부분/.test(src)) {
+    return finishTeacherHintGAS_('다음 문제에서도 전체와 부분 관계를 먼저 정리해보자');
+  }
+  return finishTeacherHintGAS_('다음 문제에서도 조건을 먼저 정리하는 습관을 이어가 보자');
+}
+
+function pickPartialWeakStepLineGAS_(analysis) {
+  var fail = analysis && analysis.primaryFailStep;
+  if (!fail || !fail.label) return '';
+  if (fail.key === 'step4') {
+    return finishTeacherHintGAS_('방정식을 세울 때 문제 조건이 모두 들어갔는지 확인해보자');
+  }
+  if (fail.key === 'step3') {
+    return finishTeacherHintGAS_('문제 속 관계가 식에 모두 들어갔는지 확인해보자');
+  }
+  return finishTeacherHintGAS_(
+    String(fail.label).replace(/하기$/, '').trim() + '에서 한 번 더 확인해보자'
+  );
+}
+
+function pickPartialCoachingHintGAS_(analysis) {
+  var out = rewriteToTeacherStrategyHintGAS_(
+    analysis && analysis.problemStrategy,
+    analysis && analysis.problemPrinciple,
+    analysis && analysis.primaryFailStep
+  );
+  if (out) return out;
+  var fail = analysis && analysis.primaryFailStep;
+  if (fail && fail.key && FEEDBACK_STEP_STRATEGY_GAS_[fail.key]) {
+    return FEEDBACK_STEP_STRATEGY_GAS_[fail.key];
+  }
+  return finishTeacherHintGAS_('문제 조건을 하나씩 식으로 바꿔보자');
+}
+
+function pickFailRemediationHintGAS_(analysis) {
+  return pickPartialCoachingHintGAS_(analysis);
+}
+
+function isSuccessPraiseSentenceGAS_(sentence, successSteps) {
+  var t = String(sentence || '');
+  if (/안정적으로 해결|잘 마쳤|잘 이어졌|훌륭|완벽|단계는 잘/.test(t)) return true;
+  var i;
+  for (i = 0; i < (successSteps || []).length; i += 1) {
+    var label = successSteps[i].label;
+    if (label && t.indexOf(label) >= 0 && /안정|잘|해결했|이어졌/.test(t)) return true;
+  }
+  return false;
+}
+
+function attachOverallPerformanceToAnalysis_(a) {
+  var base = normalizeFeedbackAnalysisCore_(a);
+  var level =
+    String(base.overallPerformanceLevel || '').trim() ||
+    deriveOverallPerformanceLevelGAS_(base.fail_count);
+  var feedbackTier =
+    String(base.feedbackTier || '').trim() ||
+    deriveFeedbackTierGAS_(base.fail_count, base.total);
+  var emphasis =
+    String(base.feedbackEmphasis || '').trim() ||
+    deriveFeedbackEmphasisGAS_(base.fail_count, base.total);
+  return {
+    successSteps: base.successSteps,
+    failSteps: base.failSteps,
+    skippedSteps: base.skippedSteps,
+    total: base.total,
+    fail_count: base.fail_count,
+    type: base.type,
+    status: base.status,
+    primarySuccessStep: base.primarySuccessStep,
+    primaryFailStep: base.primaryFailStep,
+    problemPrinciple: base.problemPrinciple,
+    problemStrategy: base.problemStrategy,
+    overallPerformanceLevel: level,
+    overallPerformanceSummary:
+      String(base.overallPerformanceSummary || '').trim() ||
+      tierOverallSummarySentenceGAS_(feedbackTier) ||
+      overallPerformanceSummarySentenceGAS_(level),
+    feedbackTier: feedbackTier,
+    feedbackEmphasis: emphasis,
+  };
+}
+
+function normalizeFeedbackAnalysisCore_(a) {
+  var src = a || {};
+  return {
+    successSteps: Array.isArray(src.successSteps) ? src.successSteps : [],
+    failSteps: Array.isArray(src.failSteps) ? src.failSteps : [],
+    skippedSteps: Array.isArray(src.skippedSteps) ? src.skippedSteps : [],
+    total: Number(src.total) || 0,
+    fail_count: Number(src.fail_count) || 0,
+    type: String(src.type || '').trim(),
+    status: String(src.status || '').trim(),
+    primarySuccessStep: src.primarySuccessStep || null,
+    primaryFailStep: src.primaryFailStep || null,
+    problemPrinciple: String(src.problemPrinciple || '').trim(),
+    problemStrategy: String(src.problemStrategy || '').trim(),
+    overallPerformanceLevel: String(src.overallPerformanceLevel || '').trim(),
+    overallPerformanceSummary: String(src.overallPerformanceSummary || '').trim(),
+    feedbackTier: String(src.feedbackTier || '').trim(),
+    feedbackEmphasis: String(src.feedbackEmphasis || '').trim(),
+  };
+}
+
+function normalizeFeedbackAnalysis_(a) {
+  return attachOverallPerformanceToAnalysis_(a);
+}
+
+function analysisFromLegacyAiPayload_(pl) {
+  var keys = ['step1', 'step2', 'step3', 'step4', 'step5_1', 'step5_2', 'step5_3', 'step6'];
+  var successSteps = [];
+  var failSteps = [];
+  var skippedSteps = [];
+  var ki;
+  var hasSheet = false;
+  for (ki = 0; ki < keys.length; ki += 1) {
+    if (!isEmptyStepCell_(pl[keys[ki]])) hasSheet = true;
+  }
+  if (hasSheet) {
+    for (ki = 0; ki < keys.length; ki += 1) {
+      var key = keys[ki];
+      var label = FEEDBACK_STEP_LABELS_GAS_[key] || key;
+      var outcome = stepOutcomeFromRaw_(pl[key]);
+      if (outcome === 'success') successSteps.push({ key: key, label: label });
+      else if (outcome === 'fail') failSteps.push({ key: key, label: label });
+      else skippedSteps.push({ key: key, label: label });
+    }
+  } else if (Array.isArray(pl.steps)) {
+    for (ki = 0; ki < pl.steps.length; ki += 1) {
+      var s = pl.steps[ki] || {};
+      var key2 = keys[ki] || 'step' + (ki + 1);
+      var label2 =
+        FEEDBACK_STEP_LABELS_GAS_[key2] ||
+        String(s.meaning != null ? s.meaning : '').trim() ||
+        key2;
+      var outcome2 = stepOutcomeFromRaw_('', Boolean(s.isCorrect));
+      if (outcome2 === 'success') successSteps.push({ key: key2, label: label2 });
+      else if (outcome2 === 'fail') failSteps.push({ key: key2, label: label2 });
+      else skippedSteps.push({ key: key2, label: label2 });
+    }
+  }
+  var total = Number(pl.total);
+  if (!Number.isFinite(total)) total = successSteps.length;
+  var failCount = Number(pl.fail_count != null ? pl.fail_count : pl.failCount);
+  if (!Number.isFinite(failCount)) failCount = failSteps.length;
+  var meta = pl.problemMeta || {};
+  return {
+    successSteps: successSteps,
+    failSteps: failSteps,
+    skippedSteps: skippedSteps,
+    total: total,
+    fail_count: failCount,
+    type: String(pl.type != null ? pl.type : meta.type || '').trim(),
+    status: String(pl.status || '').trim(),
+    primarySuccessStep: successSteps.length ? successSteps[successSteps.length - 1] : null,
+    primaryFailStep: failSteps.length ? failSteps[0] : null,
+    problemPrinciple: String(meta.problemPrinciple || pl.problemPrinciple || '').trim(),
+    problemStrategy: String(meta.problemStrategy || pl.problemStrategy || '').trim(),
+  };
+}
+
+function pickMathStrategyHintGAS_(analysis) {
+  var tier =
+    (analysis && analysis.feedbackTier) ||
+    deriveFeedbackTierGAS_(analysis && analysis.fail_count, analysis && analysis.total);
+  if (tier === 'success') return pickSuccessMaintenanceHintGAS_(analysis);
+  if (tier === 'partial') return pickPartialCoachingHintGAS_(analysis);
+  return pickFailRemediationHintGAS_(analysis);
+}
+
+function pickContextStrategyHintGAS_(analysis, options) {
+  var a = analysis || {};
+  var tier = a.feedbackTier || deriveFeedbackTierGAS_(a.fail_count, a.total);
+  if (tier === 'success') return pickSuccessMaintenanceHintGAS_(a);
+  if (tier === 'partial') return pickPartialCoachingHintGAS_(a);
+  if (tier === 'fail') return pickFailRemediationHintGAS_(a);
+  var opts = options || {};
+  var fail = a.primaryFailStep;
+  var useFail = opts.forFailStep !== false && fail && fail.key;
+  var out = rewriteToTeacherStrategyHintGAS_(
+    a.problemStrategy,
+    a.problemPrinciple,
+    useFail ? fail : null
+  );
+  if (out) return out;
+  if (useFail && fail.key && FEEDBACK_STEP_STRATEGY_GAS_[fail.key]) {
+    return FEEDBACK_STEP_STRATEGY_GAS_[fail.key];
+  }
+  return finishTeacherHintGAS_('다음 문제에서도 조건을 표에 적고 식으로 옮겨보자');
+}
+
+function replaceAwkwardFeedbackSentenceGAS_(sentence, analysis) {
+  var t = String(sentence || '').trim();
+  if (!t || !analysis) return t;
+  var tier = analysis.feedbackTier || deriveFeedbackTierGAS_(analysis.fail_count, analysis.total);
+  if (tier === 'success' && (AWKWARD_FEEDBACK_RE_GAS_.test(t) || isRemedialToneSentenceGAS_(t))) {
+    return pickSuccessMaintenanceHintGAS_(analysis);
+  }
+  if (!AWKWARD_FEEDBACK_RE_GAS_.test(t)) return unifyStudentFeedbackToneGAS_(t);
+  if (tier === 'partial') return pickPartialCoachingHintGAS_(analysis);
+  if (tier === 'fail') return pickFailRemediationHintGAS_(analysis);
+  var hasFail = Boolean(analysis.primaryFailStep && analysis.primaryFailStep.key);
+  return pickContextStrategyHintGAS_(analysis, { forFailStep: hasFail });
+}
+
+function resolveFeedbackAnalysis_(pl) {
+  var payload = pl || {};
+  if (payload.analysis && typeof payload.analysis === 'object') {
+    return normalizeFeedbackAnalysis_(payload.analysis);
+  }
+  return analysisFromLegacyAiPayload_(payload);
+}
+
+function buildFeedbackPromptInstructionsGAS_(tier) {
+  if (tier === 'success') {
+    return (
+      '【출력】 한국어 2~3문장. 번호·목록 금지.\n' +
+      '1문장: 흐름 안정. 2문장: 잘 이어진 단계. 3문장: 습관·전략 유지(이어가 보자). 실패·보완 힌트 금지.'
+    );
+  }
+  if (tier === 'partial') {
+    return (
+      '【출력】 한국어 2~3문장. 번호·목록 금지.\n' +
+      '1문장: 흐름 인정. 2문장: 약한 단계(확인해보자). 3문장: 행동 전략 1개.'
+    );
+  }
+  return (
+    '【출력】 한국어 2~3문장. 번호·목록 금지.\n' +
+    '1문장: 어려움이 있었어요. 2문장: 가장 어려운 단계. 3문장: 핵심 전략(해보자).'
+  );
+}
+
+function tierPromptBlockGAS_(tier) {
+  if (tier === 'success') {
+    return '【성공】 유지·강화 톤. 잘했어요만 쓰지 말 것. 실패·표 보완 금지.';
+  }
+  if (tier === 'partial') {
+    return '【부분 성공】 같은 교사 말투. 전략 1개.';
+  }
+  return '【실패】 행동 힌트만. 격려 최소화.';
+}
+
+function buildAiFeedbackPromptFromAnalysis_(analysis) {
+  var a = attachOverallPerformanceToAnalysis_(analysis);
+  var tier = a.feedbackTier || deriveFeedbackTierGAS_(a.fail_count, a.total);
+  var data = {
+    feedbackTier: tier,
+    overallPerformanceLevel: a.overallPerformanceLevel,
+    overallPerformanceSummary: a.overallPerformanceSummary,
+    feedbackEmphasis: a.feedbackEmphasis,
+    successSteps: [],
+    failSteps: [],
+    primarySuccessStep: a.primarySuccessStep && a.primarySuccessStep.label ? a.primarySuccessStep.label : null,
+    primaryFailStep: a.primaryFailStep && a.primaryFailStep.label ? a.primaryFailStep.label : null,
+    problemPrinciple: a.problemPrinciple || '—',
+    problemStrategy: a.problemStrategy || '—',
+    total: a.total,
+    fail_count: a.fail_count,
+    type: a.type || '—',
+    status: a.status || '—',
+  };
+  var i;
+  for (i = 0; i < a.successSteps.length; i += 1) {
+    data.successSteps.push(a.successSteps[i].label);
+  }
+  for (i = 0; i < a.failSteps.length; i += 1) {
+    data.failSteps.push(a.failSteps[i].label);
+  }
+  var extraFail = tier === 'fail' ? '\n【중요】 feedbackTier=fail이면 성공 단계 칭찬 금지.\n' : '';
+  var extraSuccess =
+    tier === 'success' ? '\n【중요】 feedbackTier=success이면 실패·보완 힌트 금지.\n' : '';
+  return (
+    '중1 일차방정식 수련 결과를 바탕으로, 옆에서 짧게 말하는 수학 선생님 톤의 학습 피드백만 작성하세요.\n\n' +
+    STUDENT_FEEDBACK_VOICE_PROMPT_GAS_ +
+    '\n\n' +
+    buildFeedbackPromptInstructionsGAS_(tier) +
+    '\n\n【수학 전략】 짧은 행동 힌트. "~를 떠올려" 금지. problemStrategy 35~55자.\n' +
+    tierPromptBlockGAS_(tier) +
+    '\n【금지】 문제 지문 인용·과한 응원·MATH-CARD·단계없음.' +
+    extraFail +
+    extraSuccess +
+    '\n【분석 데이터】\n' +
+    JSON.stringify(data, null, 2)
+  );
+}
+
+function sanitizeFeedbackTextFromAnalysis_(rawText, analysis) {
+  var text = String(rawText != null ? rawText : '')
+    .replace(/\r/g, ' ')
+    .replace(/\n+/g, ' ')
+    .replace(/\*\*([^*]+)\*\*/g, '$1')
+    .replace(/\s+/g, ' ')
+    .trim();
+  text = text.replace(/힘내요|응원해요|MATH-MASTER|MATH-CARD|아자아자|화이팅|보리도사/gi, '');
+  text = text
+    .replace(/[^.!?]{1,48}를\s*떠올리고,\s*/g, '')
+    .replace(/관계를\s*생각하고\s*/g, '')
+    .replace(/관계를\s*생각해\s*/g, '');
+  text = text.replace(/,\s*,+/g, ', ').replace(/\s+,/g, ',');
+  var parts = text.split(/(?<=[.!?…])\s+/);
+  var out = [];
+  var pi;
+  var a = analysis ? attachOverallPerformanceToAnalysis_(analysis) : null;
+  var mathCardLineRe =
+    /MATH-?CARD|매쓰\s*카드|math\s*card|카드\s*(를\s*)?(획득|얻|받)|획득(하지|하지\s*못|못)\s*(했|하였)|다음\s*카드에\s*도전/i;
+  for (pi = 0; pi < parts.length; pi += 1) {
+    var s = String(parts[pi] || '').trim();
+    if (s.length <= 2) continue;
+    if (mathCardLineRe.test(s)) continue;
+    if (a) s = unifyStudentFeedbackToneGAS_(replaceAwkwardFeedbackSentenceGAS_(s, a));
+    else s = unifyStudentFeedbackToneGAS_(s);
+    var tier = a.feedbackTier || deriveFeedbackTierGAS_(a.fail_count, a.total);
+    if ((tier === 'fail' || a.feedbackEmphasis === 'remediation') && isSuccessPraiseSentenceGAS_(s, a.successSteps)) {
+      continue;
+    }
+    if (tier === 'success' && isRemedialToneSentenceGAS_(s)) continue;
+    if (/^(전체 해결 흐름|전체 흐름|이번 문제에서는)/.test(s)) {
+      out.push(s);
+      if (out.length >= 3) break;
+      continue;
+    }
+    out.push(s);
+    if (out.length >= 3) break;
+  }
+  text = out.join(' ').trim();
+  if (text.length > 520) text = text.slice(0, 520).trim();
+  return text;
+}
+
+function templateFeedbackFromAnalysis_(analysis) {
+  var a = attachOverallPerformanceToAnalysis_(analysis);
+  var tier = a.feedbackTier || deriveFeedbackTierGAS_(a.fail_count, a.total);
+  var sentences = [
+    tierOverallSummarySentenceGAS_(tier) || a.overallPerformanceSummary,
+  ];
+  if (tier === 'success') {
+    sentences.push(pickSuccessPraiseLineGAS_(a));
+    sentences.push(pickSuccessMaintenanceHintGAS_(a));
+  } else if (tier === 'partial') {
+    if (!a.primaryFailStep && a.primarySuccessStep && a.primarySuccessStep.label) {
+      sentences.push(
+        String(a.primarySuccessStep.label).replace(/하기$/, '').trim() + '까지는 자연스럽게 이어졌어요.'
+      );
+    }
+    var weakLine = pickPartialWeakStepLineGAS_(a);
+    if (weakLine) sentences.push(weakLine);
+    sentences.push(pickPartialCoachingHintGAS_(a));
+  } else {
+    if (a.primaryFailStep && a.primaryFailStep.label) {
+      sentences.push(
+        String(a.primaryFailStep.label).replace(/하기$/, '').trim() + ' 단계에서 어려움이 있었어요.'
+      );
+    } else if (a.fail_count > 0 && !/어려움이\s*있었/.test(sentences[0] || '')) {
+      sentences.push('이번 문제의 주요 단계에서 어려움이 있었어요.');
+    }
+    sentences.push(pickFailRemediationHintGAS_(a));
+  }
+  return sanitizeFeedbackTextFromAnalysis_(sentences.join(' '), a);
+}
+
 /**
- * 단계·문제 맥락·학생 답을 반영한 맞춤 피드백 (doPost generate_ai_feedback). OPENAI_API_KEY 사용.
+ * 단계 분석 기반 피드백 (doPost generate_ai_feedback). OPENAI_API_KEY 사용.
  */
 function generateAIFeedback_(payload) {
-  Logger.log('[AI] generateAIFeedback_ called');
+  Logger.log('[AI] generateAIFeedback_ called (v4 analysis)');
   var pl = payload || {};
-  var ctx = newPayloadToContext_(pl);
+  var analysis = resolveFeedbackAnalysis_(pl);
+  var analysisFull = attachOverallPerformanceToAnalysis_(analysis);
   var key = getOpenAiApiKey_();
-  Logger.log('[AI] api key exists: ' + (key ? 'YES' : 'NO'));
-  Logger.log('[AI] payload problem: ' + JSON.stringify(pl.problemMeta || {}));
-  Logger.log('[AI] steps length: ' + (pl.steps || []).length);
 
   if (!key) {
-    Logger.log('[AI] fallback reason: API key missing → templateTrainingAiFeedbackFromContext_');
-    return buildStrictBoriFeedback_(ctx, templateTrainingAiFeedbackFromContext_(ctx));
+    Logger.log('[AI] fallback: missing API key');
+    return templateFeedbackFromAnalysis_(analysis);
   }
 
-  var userBlock =
-    '다음은 중학교 1학년(약 13세) 학생의 일차방정식 문장제 문제 풀이 결과입니다.\n\n' +
-    '[문제 정보]\n' +
-    JSON.stringify(pl.problemMeta || {}, null, 2) +
-    '\n\n[단계별 풀이]\n' +
-    JSON.stringify(pl.steps || [], null, 2) +
-    '\n\n[총점] ' +
-    (pl.total != null && pl.total !== '' ? pl.total : '—') +
-    '\n[힌트 사용] ' +
-    (pl.hint != null && pl.hint !== '' ? pl.hint : '—') +
-    '\n\n요구사항:\n' +
-    '- 최대 2~3문장만 작성하세요. 긴 문단은 절대 금지합니다.\n' +
-    '- 번호/목록 없이, 같은 나이 친구에게 반말로 짧게 말하듯 작성하세요. 존댓말 금지.\n' +
-    '- 출력에 단계 번호, 비계 이름, "첫 번째 단계", "미지수 설정", "식 표현", "3/6" 같은 표현은 절대 넣지 마세요.\n' +
-    '- 문제 분석·틀린 부분 지적·단계별 설명·다음 문제 풀이 절차는 쓰지 마세요.\n' +
-    '- 최종 답 숫자와, 미지수 대입으로 바로 이어지는 정답 식(예: 연속 두 홀수에서 큰 쪽을 x+2라고 적는다)을 직접 알려주지 마세요. 비슷한 난이도의 예시나 질문만 넣어 스스로 식을 세우게 하세요.\n' +
-    '- 예시: "한쪽을 x로 두면 다른 쪽은 몇만큼 더 큰 수야? 그 차이를 식으로 어떻게 쓸지 생각해봐."\n' +
-    '- 아래 표현은 절대 쓰지 마세요: "문제 상황을 분석해보면", "문제 상황을 살펴보면", "우리는", "학생이", "학생이 틀린 단계는", "앞으로의 풀이 전략은", "~것으로 보입니다", "어려움을 겪었을 것입니다", "이 문제를 해결하기 위한 전략은", "~하는 것이 중요합니다", "연습을 반복하는 것이 중요합니다".\n' +
-    '- 수학 힌트는 가장 중요한 포인트 1개만, 유사한 식으로만 짧게.\n' +
-    '- 가능하면 실제 문제 숫자를 그대로 반복하지 말고, 숫자를 바꾼 짧은 예시를 1개만 쓸 수 있어요.\n' +
-    '- 마지막 문장은 매번 다른 표현으로 짧게 응원하세요. 중1에게 친근한 말(최고, 대단해, 아자아자, 화이팅, MATH MASTER 느낌 등). 매번 같은 한 줄만 반복하지 마세요.\n' +
-    '- 분량은 필요한 만큼 작성해도 됩니다(시트에 전체가 저장됩니다). 장문만 피하고 핵심만 전달하세요.';
-
+  var userBlock = pl.prompt
+    ? String(pl.prompt)
+    : buildAiFeedbackPromptFromAnalysis_(analysis);
   var system =
-    '너는 보리도사다. 중1(13세) 친구에게 반말로 코칭 힌트를 준다. 단계 이름·번호·비계명 금지. 정답 식·최종 값 금지. 질문형·차이만 짚는 힌트 위주. 문제 분석·틀린 지적·단계 설명·다음 절차 금지. 마지막은 매번 다른 짧은 응원으로 끝낸다. 분량은 저장용으로 전체가 보존되므로 필요한 만큼 써도 된다.';
+    '너는 중1 수학 선생님이 옆에서 짧게 말한다. success/partial/fail 모두 같은 해요체·행동 중심 말투(해보자·확인해보자·정리해보자). 2~3문장. success면 보완 힌트 금지, fail이면 칭찬 금지. ~필요합니다·~중요합니다·설명형 금지.';
 
   var body = {
     model: 'gpt-4o-mini',
@@ -2186,8 +2797,8 @@ function generateAIFeedback_(payload) {
       { role: 'system', content: system },
       { role: 'user', content: userBlock },
     ],
-    temperature: 0.88,
-    max_tokens: 2048,
+    temperature: 0.55,
+    max_tokens: 320,
   };
 
   var res = UrlFetchApp.fetch('https://api.openai.com/v1/chat/completions', {
@@ -2201,14 +2812,10 @@ function generateAIFeedback_(payload) {
   var code = res.getResponseCode();
   var raw = res.getContentText();
   Logger.log('[AI] OpenAI response code: ' + code);
-  Logger.log('[AI] OpenAI raw response: ' + raw);
 
   if (code !== 200) {
-    Logger.log(
-      '[AI] fallback reason: OpenAI HTTP code !== 200 → templateTrainingAiFeedbackFromContext_'
-    );
     Logger.log('generateAIFeedback OpenAI HTTP ' + code + ' ' + raw);
-    return buildStrictBoriFeedback_(ctx, templateTrainingAiFeedbackFromContext_(ctx));
+    return templateFeedbackFromAnalysis_(analysis);
   }
   try {
     var parsed = JSON.parse(raw);
@@ -2219,21 +2826,25 @@ function generateAIFeedback_(payload) {
       parsed.choices[0].message.content;
     var content = msg ? String(msg).trim() : '';
     if (!content) {
-      Logger.log(
-        '[AI] fallback reason: empty message content → templateTrainingAiFeedbackFromContext_'
-      );
-      return buildStrictBoriFeedback_(ctx, templateTrainingAiFeedbackFromContext_(ctx));
+      return templateFeedbackFromAnalysis_(analysis);
     }
-    Logger.log('[AI] success: using OpenAI message content (length=' + content.length + ')');
-    return buildStrictBoriFeedback_(ctx, content);
+    var cleaned = sanitizeFeedbackTextFromAnalysis_(content, analysisFull);
+    if (cleaned) {
+      var ctxFb = {
+        problemPrinciple: analysisFull.problemPrinciple,
+        problemStrategy: analysisFull.problemStrategy,
+        total: analysisFull.total,
+      };
+      var compacted = compactStudentFeedback_(cleaned, ctxFb);
+      if (compacted) cleaned = compacted;
+    }
+    return cleaned || templateFeedbackFromAnalysis_(analysis);
   } catch (e2) {
-    Logger.log(
-      '[AI] fallback reason: JSON parse or choice path failed → templateTrainingAiFeedbackFromContext_'
-    );
     Logger.log('generateAIFeedback parse: ' + e2);
-    return buildStrictBoriFeedback_(ctx, templateTrainingAiFeedbackFromContext_(ctx));
+    return templateFeedbackFromAnalysis_(analysis);
   }
 }
+
 
 function generateTrainingAiFeedback_(ctx) {
   var key = getOpenAiApiKey_();
@@ -2478,10 +3089,11 @@ function buildRowFromPayload_(data) {
     if (failCell == null) failCell = '';
   }
 
-  var hint = data.totalHint != null && data.totalHint !== '' ? Number(data.totalHint) : '';
-  if (!Number.isFinite(hint)) hint = '';
+  var hintNum = firstFiniteNumber_(data.hint, data.totalHint);
+  var hint = hintNum != null ? hintNum : '';
 
   var ai = String(data.ai || data.aiFeedback || '');
+  var statusCell = isDiagnostic ? status : status || '';
 
   return [
     nick,
@@ -2501,10 +3113,10 @@ function buildRowFromPayload_(data) {
     steps[6],
     steps[7],
     totalCell,
-    hint,
-    status,
-    ai,
     failCell,
+    hint,
+    statusCell,
+    ai,
   ];
 }
 

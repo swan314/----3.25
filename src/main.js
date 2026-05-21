@@ -2117,7 +2117,8 @@ function renderLevelCheckPlaceholder(problemIdx = 0) {
             ${
               hasNextProblem
                 ? '<button type="button" class="mm-btn-primary mm-btn-w100" id="mm-next-problem">결과 저장 후 다음 문제로</button>'
-                : '<button type="button" class="mm-btn-primary mm-btn-primary-right" id="mm-final-achievement">최종 성취 보기</button>'
+                : `<p class="mm-final-action-hint">최종 성적보기 버튼을 누르면 레벨을 확인하고<br>방정식 수련활동에 참여할 수 있어요</p>
+                   <button type="button" class="mm-btn-primary mm-btn-primary-right" id="mm-final-achievement">최종 성취 보기</button>`
             }
           </div>
         </section>

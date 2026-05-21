@@ -20,6 +20,13 @@ import {
   resolveTrainingSaveStatus,
   SHEET_STATUS,
 } from './training/trainingStatus.js'
+import {
+  analyzeStudentStepResult,
+  buildAiFeedbackPrompt,
+  enrichAnalysisWithOverallPerformance,
+  generateFallbackFeedback,
+  sanitizeStudentFeedback,
+} from './training/studentAiFeedback.js'
 
 export const API_URL = (import.meta.env.VITE_API_URL || '').toString().trim()
 
@@ -576,58 +583,15 @@ export function buildTrainingAiFeedbackPayloadBlob(context = {}) {
 }
 
 /**
- * generate_ai_feedback용 payload (problemMeta·steps) — GET JSONP용 Base64 (길이 자동 축소)
+ * generate_ai_feedback용 payload — v4: 분석 결과만 전달 (문제 본문 제외)
  */
 export function buildGenerateAiFeedbackPayloadBlob(aiPayload) {
-  const clamp = (t, n) => (t ?? '').toString().slice(0, n)
-  const metaIn = aiPayload?.problemMeta || {}
-  let textLim = 4200
-  let qaLim = 520
-  let qLim = 360
-  for (let attempt = 0; attempt < 10; attempt += 1) {
-    const blob = {
-      problemMeta: {
-        code: clamp(metaIn.code, 120),
-        type: clamp(metaIn.type, 80),
-        context: clamp(metaIn.context, textLim),
-      },
-      steps: (Array.isArray(aiPayload?.steps) ? aiPayload.steps : []).map((s) => ({
-        index: Number(s.index) || 0,
-        meaning: clamp(s.meaning, 100),
-        question: clamp(s.question, qLim),
-        correctAnswer: clamp(s.correctAnswer, qaLim),
-        studentAnswer: clamp(s.studentAnswer, qaLim),
-        isCorrect: Boolean(s.isCorrect),
-      })),
-      total: Number(aiPayload?.total) || 0,
-      hint: Number(aiPayload?.hint) || 0,
-    }
-    const b64 = utf8ToBase64(JSON.stringify(blob))
-    if (b64.length <= 6800) {
-      return b64
-    }
-    textLim = Math.max(500, Math.floor(textLim * 0.62))
-    qaLim = Math.max(200, Math.floor(qaLim * 0.78))
-    qLim = Math.max(160, Math.floor(qLim * 0.78))
-  }
-  const minimal = {
-    problemMeta: {
-      code: clamp(metaIn.code, 120),
-      type: clamp(metaIn.type, 80),
-      context: clamp(metaIn.context, 450),
-    },
-    steps: (Array.isArray(aiPayload?.steps) ? aiPayload.steps : []).map((s) => ({
-      index: Number(s.index) || 0,
-      meaning: clamp(s.meaning, 80),
-      question: clamp(s.question, 120),
-      correctAnswer: clamp(s.correctAnswer, 140),
-      studentAnswer: clamp(s.studentAnswer, 140),
-      isCorrect: Boolean(s.isCorrect),
-    })),
-    total: Number(aiPayload?.total) || 0,
-    hint: Number(aiPayload?.hint) || 0,
-  }
-  return utf8ToBase64(JSON.stringify(minimal))
+  const analysis = enrichAnalysisWithOverallPerformance(
+    aiPayload?.analysis && typeof aiPayload.analysis === 'object'
+      ? aiPayload.analysis
+      : analyzeStudentStepResult(aiPayload),
+  )
+  return utf8ToBase64(JSON.stringify({ v: 4, analysis }))
 }
 
 function fetchAiFeedbackJsonpV3(aiPayload) {
@@ -678,117 +642,12 @@ function fetchAiFeedbackJsonpV3(aiPayload) {
   })
 }
 
+/** @deprecated studentAiFeedback.sanitizeStudentFeedback / generateFallbackFeedback 사용 */
 export function buildShortCoachingFeedback(rawFeedback, aiPayload) {
-  const contextText = String(aiPayload?.problemMeta?.context || '').replace(/\s+/g, ' ').trim()
-  const totalScore = Number(aiPayload?.total)
-  const score = Number.isFinite(totalScore)
-    ? Math.max(0, Math.min(6, Math.round(totalScore)))
-    : 0
-  const steps = Array.isArray(aiPayload?.steps) ? aiPayload.steps : []
-  const wrongSteps = steps.filter((s) => !s?.isCorrect)
-  const isAllCorrect = steps.length > 0 && wrongSteps.length === 0
-  const scoreTailByLevel = {
-    0: '다시 한번 해보자 아자아자!',
-    1: '조금씩 감 잡고 있어, 화이팅!',
-    2: '좋아, 한 단계씩 차분히 올려보자!',
-    3: '중요한 흐름은 잡았어, 조금만 더 밀어보자!',
-    4: '조금만 신경쓰면 MATH-CARD를 얻을 수 있어!',
-    5: '아주 좋아! MATH-CARD가 손안에 들어왔어!',
-    6: '완벽해, 이제 MATH-MASTER에 가까워지고 있어!',
-  }
-  const scoreTail = scoreTailByLevel[score] || scoreTailByLevel[0]
-
-  const rawTrim = String(rawFeedback || '').replace(/\s+/g, ' ').trim()
-  // GAS가 준 비어 있지 않은 문장은 유지(예전 수식 휴리스틱은 보리 프롬프트와 맞지 않아 템플릿으로 덮였음).
-  if (rawTrim) {
-    const tailRecent = rawTrim.slice(-45)
-    const alreadyEndsWithCheer =
-      /도전|화이팅|아자아자|MATH-CARD|해볼까|밀어보자|손안에|마스터|보리|최고|대단해|가자|힘내|멋져/.test(
-        tailRecent,
-      ) || rawTrim.includes('🙂')
-    const combined = alreadyEndsWithCheer ? rawTrim : `${rawTrim} ${scoreTail}`
-    return combined.trim().slice(0, AI_FEEDBACK_STORAGE_MAX_CHARS).trim()
-  }
-
-  let line1 = '조건을 식으로 한 줄씩 바꾸는 것부터 해보자.'
-  let line2 = '숫자 계산 전에 관계식 먼저 쓰면 훨씬 덜 헷갈려.'
-
-  if (isAllCorrect) {
-    return `이번 문제 흐름 정말 좋았어. 다음 문제도 식을 먼저 세우고 검산까지 해보자. ${scoreTail}`
-      .slice(0, AI_FEEDBACK_STORAGE_MAX_CHARS)
-      .trim()
-  }
-
-  if (!wrongSteps.length) {
-    return `${line1} ${line2} ${scoreTail}`.slice(0, AI_FEEDBACK_STORAGE_MAX_CHARS).trim()
-  }
-
-  const focusWrong = wrongSteps
-    .slice()
-    .sort((a, b) => Number(b?.index || 0) - Number(a?.index || 0))[0]
-  const focusIndex = Number(focusWrong?.index || 0)
-  const maxCorrectIndex = steps
-    .filter((s) => s?.isCorrect)
-    .reduce((m, s) => Math.max(m, Number(s?.index || 0)), 0)
-
-  let prefix = ''
-  if (maxCorrectIndex >= 4 && focusIndex >= 5) {
-    prefix = '관계를 식으로 옮기고 방정식까지 세운 부분은 잘했어. '
-  } else if (maxCorrectIndex >= 3 && focusIndex >= 4) {
-    prefix = '문제 상황을 식으로 나타낸 건 좋았어. '
-  } else if (maxCorrectIndex >= 2 && focusIndex >= 3) {
-    prefix = '앞 단계까지 방향은 좋았어. '
-  }
-
-  const ctx = contextText
-  const mentionsDigits = /두\s*자리|자릿수|십의\s*자리|일의\s*자리/.test(ctx)
-  const mentionsConsecutive = /연속|연이어|다음\s*수|연속하는/.test(ctx)
-  const mentionsMultipleRelation = /몇\s*배|배\s*관계|\d+\s*배|배수/.test(ctx)
-
-  if (focusIndex === 1) {
-    line1 = '문제가 최종적으로 무엇을 구하라고 하는지 한 줄로 적어보자.'
-    line2 = '그 목표를 정해 두면 조건을 식으로 연결하기 쉬워져.'
-  } else if (focusIndex === 2) {
-    line1 = '미지수는 한 번 정하면 끝까지 같은 뜻으로 써보자.'
-    line2 = '예를 들어 십의 자리를 x로 두면 식 전체에서 x 의미를 유지하면 돼.'
-  } else if (focusIndex === 3) {
-    if (mentionsDigits) {
-      line1 = '두 자리 수는 10x+a 꼴로 먼저 놓고 시작해보자.'
-      line2 = '예를 들어 일의 자리가 6이면 10x+6처럼 바로 쓰면 돼.'
-    } else if (mentionsConsecutive) {
-      line1 = '연속한 수는 x, x+1처럼 먼저 잡고 식을 세워보자.'
-      line2 = '합이나 차 조건은 x와 x+1에 그대로 넣으면 돼.'
-    } else if (mentionsMultipleRelation) {
-      line1 = '몇 배 관계는 a=kb 꼴로 먼저 써보자.'
-      line2 = '예를 들어 3배면 a=3b처럼 쓰고, 다른 조건식과 이어 보면 돼.'
-    } else {
-      line1 = '조건을 차례로 식으로 바꿔보자.'
-      line2 = '같은 미지수가 나오면 문제 안에서 의미가 같은지 한 번 더 확인해 봐.'
-    }
-  } else if (focusIndex === 4) {
-    if (mentionsDigits) {
-      line1 = '자릿수 조건은 10x+a에 그대로 넣고, 방정식 한 줄로 묶어보자.'
-      line2 = '서로 다른 조건에서 나온 식을 등호로 연결하면 돼.'
-    } else if (mentionsConsecutive) {
-      line1 = '연속 수 조건으로 나온 식들을 하나의 방정식으로 정리해보자.'
-      line2 = '정리하면 미지수 하나만 남도록 만들면 다음 단계로 가기 좋아.'
-    } else if (mentionsMultipleRelation) {
-      line1 = '몇 배로 잡은 관계식과 나머지 조건을 한 방정식으로 묶어보자.'
-      line2 = '미지수 하나만 남도록 정리했는지 확인하면 돼.'
-    } else {
-      line1 = '세운 식들을 하나의 방정식으로 묶어보자.'
-      line2 = '등호 양변을 정리해서 풀기 좋은 꼴로 만들면 돼.'
-    }
-  } else if (focusIndex === 5) {
-    line1 = '방정식은 양변에 같은 연산을 해서 차근차근 풀어보자.'
-    line2 = '중간에 분수·괄호가 있으면 한 줄씩 정리하며 맞는지 확인해 봐.'
-  } else if (focusIndex === 6) {
-    line1 = '계산 끝나면 문제에서 묻는 값이 맞는지 마지막에 꼭 확인해보자.'
-    line2 = '구한 수를 조건에 다시 넣어보면 실수를 바로 찾을 수 있어.'
-  }
-
-  const out = `${prefix}${line1} ${line2} ${scoreTail}`
-  return out.slice(0, AI_FEEDBACK_STORAGE_MAX_CHARS).trim()
+  const analysis = analyzeStudentStepResult(aiPayload)
+  const cleaned = sanitizeStudentFeedback(rawFeedback, analysis)
+  if (cleaned) return cleaned.slice(0, AI_FEEDBACK_STORAGE_MAX_CHARS).trim()
+  return generateFallbackFeedback(analysis).slice(0, AI_FEEDBACK_STORAGE_MAX_CHARS).trim()
 }
 
 /**
@@ -797,6 +656,13 @@ export function buildShortCoachingFeedback(rawFeedback, aiPayload) {
  * 실패 시 JSONP(doGet ai_feedback + v3 payload)로 폴백.
  */
 export async function postGenerateAiFeedback(aiPayload) {
+  const analysis =
+    aiPayload?.analysis && typeof aiPayload.analysis === 'object'
+      ? aiPayload.analysis
+      : analyzeStudentStepResult(aiPayload)
+  const enriched = enrichAnalysisWithOverallPerformance(analysis)
+  const requestData = { v: 4, analysis: enriched, prompt: buildAiFeedbackPrompt(enriched) }
+
   const postUrl = resolveAiFeedbackPostUrl()
   console.log('[AI] generate_ai_feedback POST route:', postUrl)
   if (!postUrl) {
@@ -806,7 +672,7 @@ export async function postGenerateAiFeedback(aiPayload) {
     const res = await fetch(postUrl, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ action: 'generate_ai_feedback', data: aiPayload }),
+      body: JSON.stringify({ action: 'generate_ai_feedback', data: requestData }),
     })
     console.log('[AI] generate_ai_feedback POST success:', res.ok, 'status:', res.status)
     const rawText = await res.text()
@@ -824,23 +690,25 @@ export async function postGenerateAiFeedback(aiPayload) {
         data.ok === true ||
         Boolean(fb))
     if (res.ok && isSuccessResponse) {
+      const feedback = sanitizeStudentFeedback(String(data.feedback ?? '').trim(), analysis)
       return {
         ok: true,
-        feedback: buildShortCoachingFeedback(String(data.feedback ?? ''), aiPayload),
+        feedback: feedback || generateFallbackFeedback(analysis),
       }
     }
   } catch (err) {
     console.warn('[Sheets] postGenerateAiFeedback POST', err)
   }
   console.log('[AI] fallback JSONP used')
-  const fallbackRes = await fetchAiFeedbackJsonpV3(aiPayload)
+  const fallbackRes = await fetchAiFeedbackJsonpV3(requestData)
   if (fallbackRes?.ok) {
+    const feedback = sanitizeStudentFeedback(String(fallbackRes.feedback ?? '').trim(), analysis)
     return {
       ...fallbackRes,
-      feedback: buildShortCoachingFeedback(String(fallbackRes.feedback ?? ''), aiPayload),
+      feedback: feedback || generateFallbackFeedback(analysis),
     }
   }
-  return fallbackRes
+  return { ...fallbackRes, feedback: generateFallbackFeedback(analysis) }
 }
 
 /**

@@ -38,8 +38,8 @@ export default function StepPracticeMathInput({
           'w-full bg-white text-slate-900 shadow-sm outline-none focus:ring-2 disabled:cursor-not-allowed disabled:bg-slate-50 disabled:text-slate-500',
           feedbackBorderClass,
           compact
-            ? 'rounded-lg px-2.5 py-3 text-sm'
-            : 'rounded-xl px-3 py-4 text-base',
+            ? 'rounded-lg px-3 py-3.5 text-sm'
+            : 'rounded-xl px-3.5 py-4 text-base',
         ].join(' ')}
         placeholder="답을 입력하세요"
       />

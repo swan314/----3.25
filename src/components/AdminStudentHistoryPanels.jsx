@@ -4,6 +4,7 @@ import {
   readRecordStatus,
   sheetStatusLabelForAdmin,
 } from '../sheets'
+import { getStudentFeedbackDisplayText } from '../training/studentAiFeedback'
 
 /** 관리자 수련 상세: 8단계 (신규 수련 구조) */
 const ADMIN_TRAINING_STEP_DEF = [
@@ -96,7 +97,7 @@ export function AdminTrainingHistoryDetail({ record }) {
   const prob = String(record.problem || '').trim()
   const typ = String(record.type || '').trim()
   const headline = [prob, typ].filter(Boolean).join(' · ') || '수련'
-  const aiSheetText = String(record.ai ?? '').trim()
+  const aiSheetText = getStudentFeedbackDisplayText(record.ai ?? record.aiFeedback ?? '')
 
   return (
     <div className="space-y-4">
@@ -165,14 +166,12 @@ export function AdminTrainingHistoryDetail({ record }) {
         </p>
       </div>
 
-      {aiSheetText ? (
-        <details className="rounded-lg border border-slate-200 bg-slate-50/60 px-3 py-2">
-          <summary className="cursor-pointer text-xs font-medium text-slate-500">
-            AI 피드백 (참고 · 품질 점검 전)
-          </summary>
-          <p className="mt-2 whitespace-pre-wrap text-xs leading-relaxed text-slate-600">{aiSheetText}</p>
-        </details>
-      ) : null}
+      <div className="rounded-xl border border-indigo-200 bg-indigo-50/90 px-4 py-3">
+        <p className="text-xs font-bold uppercase tracking-wide text-indigo-800">AI 피드백</p>
+        <p className="mt-2 whitespace-pre-wrap text-sm leading-relaxed text-slate-800">
+          {aiSheetText || '저장된 피드백이 없습니다.'}
+        </p>
+      </div>
     </div>
   )
 }

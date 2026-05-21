@@ -115,6 +115,12 @@ body {
     0 0 0 3px rgba(196, 181, 253, 0.4);
 }
 
+.training-math-field-host math-field {
+  min-height: 38px !important;
+  max-height: 42px;
+  font-size: 0.9375rem;
+}
+
 @keyframes training-intro-cta-glow {
   0%,
   100% {
@@ -216,4 +222,89 @@ body {
   background: rgba(254, 215, 170, 0.92);
   color: rgb(154 52 18);
   border: 1px solid rgba(251, 146, 60, 0.32);
+}
+
+/* 첫 화면 CTA — 모험 시작 버튼과 동일한 크기·형태 */
+.landing-cta-btn-size {
+  box-sizing: border-box;
+  height: 3rem;
+  min-height: 3rem;
+  max-height: 3rem;
+  border-radius: 0.75rem;
+  font-size: 1rem;
+  font-weight: 700;
+  line-height: 1.5rem;
+}
+
+@media (min-width: 640px) {
+  .landing-cta-btn-size {
+    height: 3.25rem;
+    min-height: 3.25rem;
+    max-height: 3.25rem;
+    font-size: 1.125rem;
+    line-height: 1.75rem;
+  }
+}
+
+/* 교사용 Google 로그인 — 모험 시작(.landing-cta-btn-size)과 동일 높이·너비 */
+.landing-teacher-btn-row--single {
+  width: 100%;
+}
+
+/* JS가 --landing-adventure-cta-width(모험 시작 버튼 실측)를 설정 */
+.landing-teacher-btn-row--single > .landing-teacher-google-wrap {
+  width: var(--landing-adventure-cta-width, 100%);
+  max-width: 100%;
+}
+
+.landing-teacher-google-wrap {
+  position: relative;
+  box-sizing: border-box;
+  min-width: 0;
+}
+
+.landing-teacher-google-wrap.landing-cta-btn-size {
+  display: block;
+}
+
+.landing-teacher-google-face {
+  box-sizing: border-box;
+  border-radius: 0.75rem;
+  font-size: inherit;
+  line-height: inherit;
+}
+
+/* 보이는 Google face와 동일 영역 — 투명 공식 버튼이 클릭 처리 (모든 화면 너비) */
+.landing-teacher-google-wrap .landing-google-signin-host {
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  display: flex;
+  width: 100% !important;
+  min-width: 0 !important;
+  max-width: none !important;
+  height: 100% !important;
+  min-height: 100% !important;
+  max-height: none !important;
+  box-sizing: border-box;
+  align-items: stretch;
+  justify-content: flex-start;
+  overflow: hidden;
+  padding: 0;
+  opacity: 0;
+  cursor: pointer;
+}
+
+.landing-teacher-btn-row .landing-google-signin-host > div {
+  display: flex !important;
+  flex-shrink: 0;
+  align-items: center;
+  justify-content: flex-start;
+  transform-origin: 0 50%;
+}
+
+.landing-teacher-btn-row .landing-google-signin-host iframe {
+  display: block !important;
+  margin: 0 !important;
+  border-radius: 0.75rem !important;
 }

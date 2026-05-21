@@ -62,8 +62,8 @@ function StepTrainingHtmlBlock({ html, className = '', compact = false }) {
     <div
       className={[
         compact
-          ? 'rounded-md border border-violet-100 bg-white px-2 py-1 text-xs leading-snug text-slate-800 sm:text-sm [&_.mm-inline-math]:align-middle'
-          : 'rounded-lg border border-violet-100 bg-white px-3 py-2.5 text-sm leading-relaxed text-slate-800 sm:text-base [&_.mm-inline-math]:align-middle',
+          ? 'rounded-md border border-slate-200/80 bg-white px-2.5 py-2 text-xs leading-normal text-slate-700 sm:text-sm [&_.mm-inline-math]:align-middle'
+          : 'rounded-lg border border-slate-200/80 bg-white px-4 py-3 text-sm leading-relaxed text-slate-700 sm:text-base [&_.mm-inline-math]:align-middle',
         className,
       ]
         .filter(Boolean)
@@ -75,15 +75,15 @@ function StepTrainingHtmlBlock({ html, className = '', compact = false }) {
 
 /** 예제·연습 문제 본문 — text-sm(0.875rem)·sm:text-base(1rem) 대비 1.3배 */
 const STEP_TRAINING_MATH_TEXT_CLASS =
-  'text-[1.1375rem] leading-tight text-slate-800 sm:text-[1.3rem] [&_.mm-inline-math]:align-middle [&_br]:hidden'
+  'text-[1.1375rem] leading-relaxed text-slate-700 sm:text-[1.3rem] [&_.mm-inline-math]:align-middle [&_br]:hidden'
 
 /** 2열 모드 예제·연습 — 기존 compact 대비 약간 축소 */
 const STEP_TRAINING_MATH_TEXT_CLASS_COMPACT =
-  'text-[0.9rem] leading-tight text-slate-800 sm:text-[1.025rem] [&_.mm-inline-math]:align-middle [&_br]:hidden'
+  'text-[0.9rem] leading-normal text-slate-700 sm:text-[1.025rem] [&_.mm-inline-math]:align-middle [&_br]:hidden'
 
-const STEP_ANSWER_LABEL_CLASS = 'font-semibold text-slate-600'
+const STEP_ANSWER_LABEL_CLASS = 'font-normal text-slate-500'
 const STEP_ANSWER_VALUE_CLASS =
-  'font-semibold text-violet-700 [&_.mm-inline-math]:align-middle'
+  'font-medium text-slate-700 [&_.mm-inline-math]:align-middle'
 
 function StepAnswerInline({ answer, textClass = '', compact = false }) {
   if (!answer || answer === 'skip') return null
@@ -111,22 +111,22 @@ function StepExamplePairs({ content, answer, compact = false }) {
   const textClass = compact ? STEP_TRAINING_MATH_TEXT_CLASS_COMPACT : STEP_TRAINING_MATH_TEXT_CLASS
 
   return (
-    <div className={compact ? 'space-y-1' : 'space-y-2'}>
+    <div className={compact ? 'space-y-2' : 'space-y-3'}>
       {pairs.map((pair, pairIndex) => (
         <div
           key={`pair-${pairIndex}`}
           className={[
-            'flex items-start justify-between gap-2 rounded-lg border border-violet-100 bg-white',
+            'flex items-start justify-between gap-2 rounded-lg border border-slate-200/80 bg-white',
             compact
-              ? 'flex-nowrap overflow-x-auto px-2 py-0.5'
-              : 'flex-wrap px-3 py-2 sm:gap-3',
+              ? 'flex-nowrap overflow-x-auto px-2.5 py-1.5'
+              : 'flex-wrap px-4 py-3 sm:gap-4',
           ].join(' ')}
         >
           <div
             className={[
-              'font-medium',
+              'font-normal',
               textClass,
-              compact ? 'shrink-0 whitespace-nowrap' : 'min-w-0 flex-1 leading-snug',
+              compact ? 'shrink-0 whitespace-nowrap' : 'min-w-0 flex-1',
             ].join(' ')}
             dangerouslySetInnerHTML={{
               __html: formatStepTrainingContentHtml(pair.problem),
@@ -153,15 +153,15 @@ function ConceptFocusedLearningCard({
   const canCheck = Boolean(practiceItem) && !isCorrect
   const compact = layoutMode === 'multi'
   const mathTextClass = compact ? STEP_TRAINING_MATH_TEXT_CLASS_COMPACT : STEP_TRAINING_MATH_TEXT_CLASS
-  const sectionGap = compact ? 'space-y-2' : 'space-y-5'
-  const cardPadding = compact ? 'px-2.5 py-2' : 'p-4'
+  const sectionGap = compact ? 'space-y-3' : 'space-y-6'
+  const cardPadding = compact ? 'px-3.5 py-3.5' : 'p-5 sm:p-6'
   const sectionLabelClass = compact
-    ? 'mb-0.5 shrink-0 text-[10px] font-bold tracking-wide text-violet-700'
-    : 'mb-2 text-xs font-bold tracking-wide text-violet-700'
+    ? 'mb-1 shrink-0 text-[10px] font-medium tracking-wide text-slate-500'
+    : 'mb-2.5 text-xs font-medium tracking-wide text-slate-500'
   const practiceSectionLabelClass = compact
-    ? 'mb-1.5 shrink-0 text-[11px] font-extrabold tracking-wide text-violet-900 sm:text-xs'
-    : 'mb-2 text-sm font-extrabold tracking-wide text-violet-900'
-  const sectionBodyClass = compact ? 'space-y-1' : 'space-y-3'
+    ? 'mb-2 shrink-0 text-[11px] font-semibold tracking-wide text-slate-700 sm:text-xs'
+    : 'mb-3 text-sm font-semibold tracking-wide text-slate-700'
+  const sectionBodyClass = compact ? 'space-y-2' : 'space-y-4'
 
   const practiceBoxBorderClass = isCorrect
     ? 'border-2 border-emerald-400 bg-emerald-50/30 ring-1 ring-emerald-100'
@@ -174,7 +174,7 @@ function ConceptFocusedLearningCard({
   return (
     <article
       className={[
-        'flex h-full flex-col rounded-xl border border-violet-200 bg-violet-50/50',
+        'flex h-full flex-col rounded-xl border border-slate-200 bg-slate-50/60',
         cardPadding,
         layoutMode === 'single' ? 'mx-auto w-full' : '',
       ]
@@ -183,10 +183,10 @@ function ConceptFocusedLearningCard({
     >
       <h4
         className={[
-          'shrink-0 font-extrabold text-violet-900',
+          'shrink-0 font-semibold text-slate-800',
           compact
-            ? 'mb-1 text-center text-[1.05rem] leading-tight'
-            : 'mb-3 text-base',
+            ? 'mb-2 text-center text-[1.05rem] leading-snug'
+            : 'mb-4 text-base leading-snug',
         ].join(' ')}
       >
         {getTrainingKeyDisplayLabel(bundle.trainingKey)}
@@ -227,8 +227,8 @@ function ConceptFocusedLearningCard({
         {practiceItem ? (
           <section
             className={[
-              'mt-auto flex flex-col rounded-lg bg-violet-100/50 px-2 pb-2 pt-2',
-              compact ? 'mt-2' : 'mt-3',
+              'mt-auto flex flex-col rounded-lg bg-slate-100/70 px-3 pb-3 pt-3',
+              compact ? 'mt-3' : 'mt-4',
             ].join(' ')}
           >
             <p className={practiceSectionLabelClass}>연습문제를 직접 풀어보아요</p>
@@ -237,8 +237,8 @@ function ConceptFocusedLearningCard({
                 'rounded-lg bg-white transition-colors',
                 practiceBoxBorderClass,
                 compact
-                  ? 'flex flex-col gap-2 px-2 py-1.5'
-                  : 'space-y-3 px-3 py-3',
+                  ? 'flex flex-col gap-3 px-2.5 py-2.5'
+                  : 'space-y-4 px-4 py-4',
               ].join(' ')}
             >
               <div
@@ -251,7 +251,7 @@ function ConceptFocusedLearningCard({
                 <div
                   className={[
                     mathTextClass,
-                    'font-medium',
+                    'font-normal',
                     isCorrect ? 'shrink-0 whitespace-nowrap' : '',
                   ]
                     .filter(Boolean)
@@ -266,7 +266,7 @@ function ConceptFocusedLearningCard({
               </div>
 
               {!isCorrect ? (
-                <div className={compact ? 'flex shrink-0 flex-col gap-1' : 'contents'}>
+                <div className={compact ? 'flex shrink-0 flex-col gap-2.5' : 'contents'}>
                   <StepPracticeMathInput
                     inputId={`step-practice-${bundle.trainingKey}`}
                     value={practiceInput}
@@ -280,10 +280,10 @@ function ConceptFocusedLearningCard({
                     disabled={!canCheck || !String(practiceInput || '').trim()}
                     onClick={onCheckAnswer}
                     className={[
-                      'w-full rounded-lg bg-violet-600 font-semibold text-white transition hover:bg-violet-700 disabled:cursor-not-allowed disabled:opacity-50',
+                      'w-full rounded-lg bg-violet-600 font-medium text-white transition hover:bg-violet-700 disabled:cursor-not-allowed disabled:opacity-50',
                       compact
-                        ? 'px-3 py-0.5 text-xs leading-tight sm:text-sm'
-                        : 'rounded-xl px-4 py-1.5 text-sm sm:text-base',
+                        ? 'px-3 py-2 text-xs leading-normal sm:text-sm'
+                        : 'rounded-xl px-4 py-2.5 text-sm leading-normal sm:text-base',
                     ].join(' ')}
                   >
                     정답 확인
@@ -294,8 +294,8 @@ function ConceptFocusedLearningCard({
               {isCorrect ? (
                 <p
                   className={[
-                    'shrink-0 rounded-lg border border-emerald-200 bg-emerald-50 font-semibold text-emerald-900',
-                    compact ? 'px-2 py-1.5 text-[11px] leading-snug' : 'px-3 py-2.5 text-sm',
+                    'shrink-0 rounded-lg border border-emerald-200 bg-emerald-50 font-medium text-emerald-800',
+                    compact ? 'px-2.5 py-2 text-[11px] leading-normal' : 'px-4 py-3 text-sm leading-relaxed',
                   ].join(' ')}
                 >
                   {layoutMode === 'multi'
@@ -452,25 +452,25 @@ export default function StepFocusedLearningModal({
         onPointerCancel={handleDragEnd}
       >
         <div
-          className="shrink-0 cursor-grab border-b border-violet-100 bg-violet-50/80 px-3 py-1.5 active:cursor-grabbing sm:px-4"
+          className="shrink-0 cursor-grab border-b border-slate-200 bg-slate-50/90 px-4 py-3 active:cursor-grabbing sm:px-5"
           onPointerDown={handleDragStart}
         >
-          <div className="flex flex-col gap-0.5">
+          <div className="flex flex-col gap-1">
             <h3
               id="step-focused-learning-title"
-              className="text-base font-extrabold leading-tight text-slate-900 sm:text-lg"
+              className="text-base font-bold leading-snug text-slate-900 sm:text-lg"
             >
               단계 집중 학습
             </h3>
             {stageLabel ? (
-              <p className="text-sm font-semibold leading-tight text-violet-700">{stageLabel}</p>
+              <p className="text-sm font-medium leading-relaxed text-slate-600">{stageLabel}</p>
             ) : null}
           </div>
         </div>
 
         <div
           className={[
-            'shrink-0 px-2.5 py-2 sm:px-3 sm:py-2',
+            'shrink-0 px-4 py-4 sm:px-5 sm:py-5',
             layoutMode === 'single' ? 'flex justify-center' : '',
           ].join(' ')}
         >
@@ -480,7 +480,7 @@ export default function StepFocusedLearningModal({
             <div
               className={[
                 layoutMode === 'multi'
-                  ? 'grid grid-cols-1 items-stretch gap-2 md:grid-cols-2'
+                  ? 'grid grid-cols-1 items-stretch gap-4 md:grid-cols-2 md:gap-5'
                   : 'w-full',
               ].join(' ')}
             >
@@ -502,12 +502,12 @@ export default function StepFocusedLearningModal({
           )}
         </div>
 
-        <div className="shrink-0 border-t border-violet-100 px-3 py-2 sm:px-4">
+        <div className="shrink-0 border-t border-slate-200 px-4 py-4 sm:px-5">
           <div className="flex justify-center">
             <button
               type="button"
               onClick={onClose}
-              className="inline-flex w-auto rounded-xl bg-emerald-600 px-5 py-2 text-sm font-bold text-white transition hover:bg-emerald-700 sm:px-6"
+              className="inline-flex w-auto rounded-xl bg-emerald-600 px-6 py-2.5 text-sm font-semibold text-white transition hover:bg-emerald-700 sm:px-7"
             >
               원래 문제로 돌아가기
             </button>

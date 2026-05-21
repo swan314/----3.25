@@ -1,3 +1,5 @@
+import { normalizeTrainingPedagogyFields } from './trainingProblemMeta.js'
+
 /** @param {string} cell */
 export function unquoteCsvCell(cell) {
   let s = (cell ?? '').toString().trim()
@@ -879,6 +881,85 @@ function removeCoefficientOneParentheses(raw) {
   return out
 }
 
+/** depth 0에서 +/− 존재 여부 (연산 우선순위: 덧셈이 나눗셈·곱셈보다 낮음) */
+function hasTopLevelAddSub(text) {
+  let depth = 0
+  for (let i = 0; i < text.length; i += 1) {
+    const ch = text[i]
+    if (ch === '(') depth += 1
+    else if (ch === ')') depth = Math.max(0, depth - 1)
+    if (depth === 0 && (ch === '+' || ch === '-')) {
+      if (i === 0) continue
+      return true
+    }
+  }
+  return false
+}
+
+/** depth 0에서 이항 연산자로 분리 */
+function splitTopLevelBinaryOp(raw, opChar) {
+  const text = String(raw ?? '').trim()
+  if (!text) return []
+  const parts = []
+  let depth = 0
+  let cur = ''
+  for (let i = 0; i < text.length; i += 1) {
+    const ch = text[i]
+    if (ch === '(') depth += 1
+    else if (ch === ')') depth = Math.max(0, depth - 1)
+    if (ch === opChar && depth === 0) {
+      parts.push(cur)
+      cur = ''
+      continue
+    }
+    cur += ch
+  }
+  if (cur) parts.push(cur)
+  return parts.map((p) => p.trim()).filter(Boolean)
+}
+
+/**
+ * 수식 정규화: 덧셈 항 정렬, 곱셈 인수 정렬, 분수 분자·분모 재귀 정규화.
+ * (480+x)/36 ↔ (x+480)/36, 2*x*480 ↔ 480*2*x 등
+ */
+function canonicalizeMathExpression(raw) {
+  let s = normalizeEquationSide(raw)
+  if (!s) return ''
+
+  if (hasTopLevelAddSub(s)) {
+    return splitTopLevelSignedTerms(s)
+      .map((term) => canonicalizeMathExpression(term))
+      .filter(Boolean)
+      .sort()
+      .join('+')
+  }
+
+  const divParts = splitTopLevelBinaryOp(s, '/')
+  if (divParts.length >= 2) {
+    let acc = canonicalizeMathExpression(divParts[0])
+    for (let i = 1; i < divParts.length; i += 1) {
+      acc = `D(${acc},${canonicalizeMathExpression(divParts[i])})`
+    }
+    return acc
+  }
+
+  const mulParts = splitTopLevelBinaryOp(s, '*')
+  if (mulParts.length >= 2) {
+    return mulParts
+      .map((part) => canonicalizeMathExpression(part))
+      .filter(Boolean)
+      .sort()
+      .join('*')
+  }
+
+  const inner = stripOuterParens(s)
+  if (inner !== s) return canonicalizeMathExpression(inner)
+
+  const reduced = removeCoefficientOneParentheses(s)
+  if (reduced && reduced !== s) return canonicalizeMathExpression(reduced)
+  return s
+}
+
 /** 덧셈·뺄셈 최상위 항 분리 (교환·결합법칙 정규화용) */
 function splitTopLevelSignedTerms(raw) {
   const text = String(raw ?? '').trim()
@@ -935,18 +1016,61 @@ function negateCanonicalAdditionExpression(canonical) {
     .join('+')
 }
 
+function negateSignedTerm(term) {
+  const t = String(term ?? '').trim()
+  if (!t) return ''
+  if (t.startsWith('-')) return t.slice(1) || ''
+  return `-${t}`
+}
+
+/**
+ * 좌변−우변을 한쪽으로 모은 표준형 (이항 동치).
+ * 90x=60x+900 ↔ 90x-60x=900 → 동일 키
+ */
+function equationStandardFormSignature(leftRaw, rightRaw) {
+  const leftTerms = splitTopLevelSignedTerms(
+    removeCoefficientOneParentheses(stripOuterParens(leftRaw)),
+  )
+  const rightTerms = splitTopLevelSignedTerms(
+    removeCoefficientOneParentheses(stripOuterParens(rightRaw)),
+  )
+  const combined = [...leftTerms, ...rightTerms.map(negateSignedTerm)]
+    .map((v) => stripOuterParens(removeCoefficientOneParentheses(v)).trim())
+    .filter(Boolean)
+    .sort()
+    .join('+')
+  return combined
+}
+
+/** 표준형과 양변 부호 반전(×−1) 후보 */
+function equationMovedTermsSignatures(leftRaw, rightRaw) {
+  const form = equationStandardFormSignature(leftRaw, rightRaw)
+  if (!form) return []
+  const neg = negateCanonicalAdditionExpression(form)
+  const keys = [form]
+  if (neg && neg !== form) keys.push(neg)
+  return keys
+}
+
+function equationsEquivalentByMovedTerms(sLeft, sRight, eLeft, eRight) {
+  const studentKeys = new Set(equationMovedTermsSignatures(sLeft, sRight))
+  if (!studentKeys.size) return false
+  return equationMovedTermsSignatures(eLeft, eRight).some((key) => studentKeys.has(key))
+}
+
 /**
  * 등식 동치용 서명: 좌우 교환·양변 부호 동시 반전을 하나의 키로 통일.
  * 1000x=4000, 4000=1000x, -1000x=-4000, -4000=-1000x → 동일
  */
 function equationEquivalenceSignature(leftRaw, rightRaw) {
-  const left = canonicalizeAdditionExpression(leftRaw)
-  const right = canonicalizeAdditionExpression(rightRaw)
+  const left = canonicalizeMathExpression(leftRaw)
+  const right = canonicalizeMathExpression(rightRaw)
   if (!left || !right) return ''
-  const negLeft = negateCanonicalAdditionExpression(left)
-  const negRight = negateCanonicalAdditionExpression(right)
+  const negLeft = /[D(]|\*/.test(left) ? '' : negateCanonicalAdditionExpression(left)
+  const negRight = /[D(]|\*/.test(right) ? '' : negateCanonicalAdditionExpression(right)
   const pairKey = (a, b) => [a, b].sort().join('|')
-  const candidates = [pairKey(left, right), pairKey(negLeft, negRight)].filter(Boolean)
+  const candidates = [pairKey(left, right)]
+  if (negLeft && negRight) candidates.push(pairKey(negLeft, negRight))
   return candidates.sort()[0] ?? ''
 }
 
@@ -959,8 +1083,8 @@ function looksLikeMathExpression(raw) {
 
 /**
  * 수학식 동치 비교:
- * - 덧셈식은 '+' 항 정렬 비교
- * - 방정식은 좌우 교환·양변 부호 반전까지 동치
+ * - 덧셈·곱셈·분수식은 교환·결합법칙으로 정규화 후 비교
+ * - 방정식은 좌우 교환·양변 부호 반전·이항 동치
  * - 포함 비교는 사용하지 않음
  */
 export function isMathExpressionEquivalent(studentRaw, expectedRaw) {
@@ -974,13 +1098,15 @@ export function isMathExpressionEquivalent(studentRaw, expectedRaw) {
   if (sHasEq !== eHasEq) return false
 
   if (!sHasEq) {
-    return canonicalizeAdditionExpression(s) === canonicalizeAdditionExpression(e)
+    return canonicalizeMathExpression(s) === canonicalizeMathExpression(e)
   }
 
   const [sLeft, sRight, ...sRest] = s.split('=')
   const [eLeft, eRight, ...eRest] = e.split('=')
   if (sRest.length || eRest.length) return false
   if (sLeft == null || sRight == null || eLeft == null || eRight == null) return false
+
+  if (equationsEquivalentByMovedTerms(sLeft, sRight, eLeft, eRight)) return true
 
   const studentSig = equationEquivalenceSignature(sLeft, sRight)
   const expectedSig = equationEquivalenceSignature(eLeft, eRight)
@@ -1051,7 +1177,7 @@ export function parseLevel1Csv(csvText) {
       row[h] = cols[i] ?? ''
     })
     if (!(row['문제 텍스트'] || row['유형'])) continue
-    rows.push(row)
+    rows.push(normalizeTrainingPedagogyFields(row))
   }
   return rows
 }

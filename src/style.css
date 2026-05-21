@@ -1515,7 +1515,19 @@ code {
 }
 
 .mm-result-actions-final {
+  align-items: center;
   justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 14px 16px;
+}
+
+.mm-final-action-hint {
+  flex: 1 1 220px;
+  margin: 0;
+  font-size: 0.9rem;
+  line-height: 1.55;
+  color: #475569;
+  text-align: right;
 }
 
 .mm-result-actions-final .mm-btn-primary-right {
@@ -1530,8 +1542,13 @@ code {
   }
 
   .mm-result-actions-final {
-    flex-direction: row;
+    flex-direction: column;
+    align-items: stretch;
     justify-content: stretch;
+  }
+
+  .mm-final-action-hint {
+    text-align: left;
   }
 
   .mm-result-actions-final .mm-btn-primary-right {

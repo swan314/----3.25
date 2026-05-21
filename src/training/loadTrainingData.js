@@ -1,5 +1,6 @@
 import { getTrainingCsvPathForStage } from '../levelConfig'
 import { parseLevel1Csv } from './scaffoldUtils'
+import { normalizeTrainingPedagogyFields } from './trainingProblemMeta.js'
 
 /**
  * 레벨 매핑에 따라 각 단계 CSV를 순서대로 불러와 한 배열로 합칩니다.
@@ -17,7 +18,9 @@ export async function loadTrainingRowsForStages(stageNumbers) {
     }
     const text = await res.text()
     const rows = parseLevel1Csv(text)
-    for (const r of rows) merged.push({ ...r, __poolStage: sn })
+    for (const r of rows) {
+      merged.push({ ...normalizeTrainingPedagogyFields(r), __poolStage: sn })
+    }
   }
 
   return merged

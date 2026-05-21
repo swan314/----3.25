@@ -21,8 +21,19 @@ function showBootError(message) {
   `
 }
 
+/** MathLive 가상 키보드 등에서 흔한 무해한 브라우저 경고 — 앱 오류로 취급하지 않음 */
+function isBenignResizeObserverError(message) {
+  const text = String(message || '')
+  return /ResizeObserver loop (completed with undelivered notifications|limit exceeded)/i.test(text)
+}
+
 window.addEventListener('error', (event) => {
-  showBootError(event?.error?.stack || event?.message || 'unknown error')
+  const message = event?.error?.stack || event?.message || 'unknown error'
+  if (isBenignResizeObserverError(event?.message) || isBenignResizeObserverError(message)) {
+    event.preventDefault?.()
+    return
+  }
+  showBootError(message)
 })
 
 window.addEventListener('unhandledrejection', (event) => {
@@ -32,6 +43,10 @@ window.addEventListener('unhandledrejection', (event) => {
     reason?.stack ||
     reason?.message ||
     'unhandled promise rejection'
+  if (isBenignResizeObserverError(message)) {
+    event.preventDefault?.()
+    return
+  }
   showBootError(message)
 })
 

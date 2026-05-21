@@ -76,6 +76,57 @@ function decodeJwtPayload(token) {
   }
 }
 
+function measureGoogleRenderWidth(buttonHost) {
+  const section = buttonHost.closest('section')
+  const syncedPx = parseFloat(
+    section?.style.getPropertyValue('--landing-adventure-cta-width') || '',
+  )
+  if (syncedPx > 0) return Math.round(syncedPx)
+
+  const wrap = buttonHost.closest('.landing-teacher-google-wrap')
+  const face = wrap?.querySelector('.landing-teacher-google-face')
+  const slotWidth = Math.floor(
+    face?.getBoundingClientRect().width ||
+      wrap?.getBoundingClientRect().width ||
+      buttonHost.getBoundingClientRect().width ||
+      buttonHost.offsetWidth
+  )
+  return Math.max(slotWidth, 200)
+}
+
+/** Google GSI 버튼을 옆 관리자 CTA와 동일한 너비·높이로 맞춤 */
+function syncGoogleSignInButtonFit(buttonHost) {
+  const inner = buttonHost.firstElementChild
+  const iframe = buttonHost.querySelector('iframe')
+  if (!(inner instanceof HTMLElement) || !(iframe instanceof HTMLElement)) return
+
+  const wrap = buttonHost.closest('.landing-teacher-google-wrap')
+  const face = wrap?.querySelector('.landing-teacher-google-face')
+  const faceRect = face?.getBoundingClientRect()
+
+  const targetW = faceRect?.width || buttonHost.getBoundingClientRect().width
+  const targetH = faceRect?.height || buttonHost.getBoundingClientRect().height
+  const actualW = iframe.getBoundingClientRect().width
+  const actualH = iframe.getBoundingClientRect().height
+  if (!targetW || !actualW || !actualH || !targetH) return
+
+  const boxW = wrap?.getBoundingClientRect().width || targetW
+  const boxH = faceRect?.height || targetH
+
+  buttonHost.style.width = `${boxW}px`
+  buttonHost.style.minWidth = `${boxW}px`
+  buttonHost.style.maxWidth = `${boxW}px`
+  buttonHost.style.height = `${boxH}px`
+  buttonHost.style.minHeight = `${boxH}px`
+  buttonHost.style.maxHeight = `${boxH}px`
+
+  inner.style.width = `${actualW}px`
+  inner.style.height = `${actualH}px`
+  inner.style.maxWidth = 'none'
+  inner.style.transformOrigin = '0 50%'
+  inner.style.transform = `scale(${boxW / actualW}, ${boxH / actualH})`
+}
+
 /** 관리자 학생 목록 레벨 필터 (문자열 레벨과 매칭) */
 function adminLevelMatchesFilter(levelRaw, filterValue) {
   if (!filterValue || filterValue === 'all') return true
@@ -180,6 +231,9 @@ export default function App() {
   const [adminHistoryView, setAdminHistoryView] = useState(/** @type {'list' | 'detail'} */ ('list'))
   const [adminSelectedHistoryRecord, setAdminSelectedHistoryRecord] = useState(null)
   const googleBtnRef = useRef(null)
+  const adventureCtaRef = useRef(/** @type {HTMLButtonElement | null} */ (null))
+  const landingSectionRef = useRef(/** @type {HTMLElement | null} */ (null))
+  const lastGoogleRenderWidthRef = useRef(0)
   const getLevelFromPlan = (plan) =>
     resolveCanonicalDiagnosticTier(plan?.diagnosticRecord?.level || plan?.diagnosticTier || '하')
 
@@ -412,6 +466,40 @@ export default function App() {
     }
   }, [runProgressFromCredentials])
 
+  /** 모험 시작 CTA 실측 너비 → Google 로그인 버튼에 동일 적용 */
+  useEffect(() => {
+    if (activeView !== 'landing' || studentFlowStep !== 'nickname') return
+
+    const btn = adventureCtaRef.current
+    const section = landingSectionRef.current
+    if (!btn || !section) return
+
+    const syncWidth = () => {
+      const w = btn.getBoundingClientRect().width
+      if (w > 0) {
+        section.style.setProperty('--landing-adventure-cta-width', `${w}px`)
+      }
+    }
+
+    syncWidth()
+    const ro =
+      typeof ResizeObserver !== 'undefined'
+        ? new ResizeObserver(() => {
+            syncWidth()
+          })
+        : null
+    ro?.observe(btn)
+    const card = btn.closest('.rounded-2xl')
+    if (card instanceof HTMLElement) ro?.observe(card)
+    window.addEventListener('resize', syncWidth)
+
+    return () => {
+      ro?.disconnect()
+      window.removeEventListener('resize', syncWidth)
+      section.style.removeProperty('--landing-adventure-cta-width')
+    }
+  }, [activeView, studentFlowStep])
+
   useEffect(() => {
     const clientId = import.meta.env.VITE_GOOGLE_CLIENT_ID
     if (!clientId) {
@@ -449,30 +537,73 @@ export default function App() {
       })
 
       buttonHost.innerHTML = ''
+      const renderWidth = measureGoogleRenderWidth(buttonHost)
+      lastGoogleRenderWidthRef.current = renderWidth
       window.google.accounts.id.renderButton(buttonHost, {
         theme: 'filled_blue',
         size: 'large',
-        shape: 'pill',
-        width: 320,
+        shape: 'rectangular',
+        width: renderWidth,
         text: 'signin_with',
+        locale: 'ko',
+      })
+
+      requestAnimationFrame(() => {
+        requestAnimationFrame(() => syncGoogleSignInButtonFit(buttonHost))
       })
     }
 
     if (existingScript) {
       initializeGoogle()
-      return
+    } else {
+      const script = document.createElement('script')
+      script.src = 'https://accounts.google.com/gsi/client'
+      script.async = true
+      script.defer = true
+      script.dataset.googleGsi = 'true'
+      script.onload = initializeGoogle
+      script.onerror = () => {
+        setTeacherAuthError('Google 로그인 스크립트를 불러오지 못했습니다.')
+      }
+      document.head.appendChild(script)
     }
 
-    const script = document.createElement('script')
-    script.src = 'https://accounts.google.com/gsi/client'
-    script.async = true
-    script.defer = true
-    script.dataset.googleGsi = 'true'
-    script.onload = initializeGoogle
-    script.onerror = () => {
-      setTeacherAuthError('Google 로그인 스크립트를 불러오지 못했습니다.')
+    const host = googleBtnRef.current
+    if (!host) return
+
+    const teacherBtnRow = host.closest('.landing-teacher-btn-row')
+    const googleWrap = host.closest('.landing-teacher-google-wrap')
+    const googleFace = googleWrap?.querySelector('.landing-teacher-google-face')
+
+    const refreshGoogleButtonLayout = () => {
+      const buttonHost = googleBtnRef.current
+      if (!buttonHost) return
+      syncGoogleSignInButtonFit(buttonHost)
+      if (!window.google?.accounts?.id) return
+      const renderWidth = measureGoogleRenderWidth(buttonHost)
+      if (renderWidth !== lastGoogleRenderWidthRef.current) {
+        initializeGoogle()
+      }
     }
-    document.head.appendChild(script)
+
+    const resizeObserver =
+      typeof ResizeObserver !== 'undefined'
+        ? new ResizeObserver(() => {
+            refreshGoogleButtonLayout()
+          })
+        : null
+    resizeObserver?.observe(host)
+    if (googleWrap) resizeObserver?.observe(googleWrap)
+    if (teacherBtnRow) resizeObserver?.observe(teacherBtnRow)
+    if (googleFace) resizeObserver?.observe(googleFace)
+    const adventureBtn = adventureCtaRef.current
+    if (adventureBtn) resizeObserver?.observe(adventureBtn)
+    window.addEventListener('resize', refreshGoogleButtonLayout)
+
+    return () => {
+      resizeObserver?.disconnect()
+      window.removeEventListener('resize', refreshGoogleButtonLayout)
+    }
   }, [activeView, studentFlowStep])
 
   const reloadTeacherClasses = useCallback(async () => {
@@ -513,16 +644,6 @@ export default function App() {
     const level = getLevelFromPlan(trainingPlan)
     console.log('[diagnostic-intro] level:', level)
   }, [activeView, trainingPlan])
-
-  const handleTeacherDashboardEnter = () => {
-    if (!teacherProfile) {
-      window.alert('먼저 Google로 로그인해 주세요.')
-      return
-    }
-    setTeacherDashStep('pickClass')
-    setAdminPage('dashboard')
-    setActiveView('teacher-dashboard')
-  }
 
   const handleTeacherLogout = () => {
     setTeacherProfile(null)
@@ -972,10 +1093,12 @@ export default function App() {
       <div className="pointer-events-none absolute inset-0 opacity-25 [background-image:radial-gradient(circle_at_center,rgba(59,130,246,0.22)_1.5px,transparent_1.5px),radial-gradient(circle_at_center,rgba(234,179,8,0.2)_1.5px,transparent_1.5px)] [background-position:0_0,28px_28px] [background-size:56px_56px]" />
 
       <main
-        className={`relative mx-auto flex w-full max-w-6xl flex-col px-4 sm:px-6 lg:px-10 ${
-          activeView === 'diagnostic-intro'
-            ? 'flex min-h-[calc(100dvh-2rem)] flex-1 flex-col justify-center py-10 sm:py-12'
-            : 'py-8 lg:py-12'
+        className={`relative mx-auto flex w-full flex-col px-4 sm:px-6 lg:px-10 ${
+          activeView === 'landing'
+            ? 'max-w-[92rem] flex min-h-[calc(100dvh-2rem)] flex-1 justify-center py-6 sm:py-8 lg:py-10'
+            : activeView === 'diagnostic-intro'
+              ? 'max-w-6xl flex min-h-[calc(100dvh-2rem)] flex-1 justify-center py-10 sm:py-12'
+              : 'max-w-6xl py-8 lg:py-12'
         }`}
       >
         {activeView === 'training' && (
@@ -1072,78 +1195,98 @@ export default function App() {
         )}
 
         {activeView === 'landing' && (
-          <section className="rounded-3xl border border-blue-200/80 bg-white/70 p-6 shadow-2xl shadow-blue-300/20 backdrop-blur-md sm:p-8 lg:p-10">
+          <section
+            ref={landingSectionRef}
+            className="w-full rounded-3xl border border-blue-200/70 bg-white/90 p-7 shadow-lg shadow-blue-200/15 backdrop-blur-md sm:p-9 lg:p-11"
+          >
             {studentFlowStep === 'nickname' && (
-              <div className="grid items-center gap-8 lg:grid-cols-[1.1fr_0.9fr]">
-                <div className="space-y-5">
-                  <span className="inline-flex rounded-full bg-blue-600 px-4 py-1.5 text-sm font-semibold text-white shadow-lg shadow-blue-500/30">
+              <>
+                <div className="mb-6 space-y-3 text-center sm:mb-8">
+                  <span className="inline-flex rounded-full bg-blue-600 px-3.5 py-1 text-xs font-semibold text-white shadow-sm shadow-blue-500/20 sm:text-sm">
                     MAGIC MATH WORLD
                   </span>
-                  <h1 className="text-balance text-3xl font-black leading-tight text-blue-950 sm:text-4xl lg:text-5xl">
-                    수학마법:
-                    <br />
-                    일차방정식의 호흡
+                  <h1 className="flex flex-wrap items-center justify-center gap-x-3 gap-y-1 text-balance text-3xl font-black leading-tight text-blue-950 sm:text-4xl lg:text-[2.75rem]">
+                    <span className="text-sm text-amber-200/40 sm:text-base" aria-hidden>
+                      ✨
+                    </span>
+                    <span>
+                      수학마법:
+                      <br />
+                      일차방정식의 모험
+                    </span>
+                    <span className="text-sm text-amber-200/40 sm:text-base" aria-hidden>
+                      ✨
+                    </span>
                   </h1>
-                  <p className="max-w-2xl text-base leading-relaxed text-slate-700 sm:text-lg">
-                    수학마법의 주문(일차방정식)을 익히고, 문제를 풀며 성장하는 모험을 시작해 보세요.
+                  <p className="mx-auto max-w-2xl text-sm leading-relaxed text-slate-600 sm:text-base">
+                    손오공 일행과 함께 일차방정식 모험을 시작해 보세요.
                   </p>
                 </div>
 
-                <div className="mx-auto flex w-full max-w-xl flex-col overflow-hidden rounded-3xl border border-blue-300/70 shadow-2xl shadow-blue-400/35">
-                  <div className="relative aspect-[7/5] w-full overflow-hidden">
-                    <img
-                      src={magicMainIllustration}
-                      alt="수학마법 메인 배경"
-                      className="h-full w-full object-cover object-center"
-                    />
-                    <div className="pointer-events-none absolute inset-0 bg-gradient-to-t from-black/35 via-black/5 to-black/15" />
+                <div className="grid items-stretch gap-6 sm:gap-7 lg:grid-cols-2 lg:gap-8">
+                  <div className="order-2 flex min-h-0 w-full min-w-0 lg:order-1">
+                    <div className="flex h-full min-h-[17.5rem] w-full flex-col justify-center rounded-2xl border-2 border-amber-300/85 bg-gradient-to-b from-amber-50/50 to-white px-6 py-6 shadow-md shadow-amber-200/25 sm:min-h-[18.5rem] sm:px-7 sm:py-7 lg:min-h-0">
+                      <form className="flex flex-col gap-6" onSubmit={handleNicknameStepSubmit}>
+                        <div>
+                          <h2 className="text-lg font-extrabold text-amber-600 sm:text-xl">⭐ 모험 시작하기</h2>
+                          <p className="mt-1.5 text-sm text-slate-500">닉네임을 입력하고 시작해 보세요!</p>
+                        </div>
+                        <div>
+                          <label className="sr-only" htmlFor="nickname">
+                            닉네임
+                          </label>
+                          <input
+                            id="nickname"
+                            type="text"
+                            value={studentNickname}
+                            onChange={(event) => setStudentNickname(event.target.value)}
+                            placeholder="예: 방정식탐험가"
+                            autoComplete="username"
+                            className="w-full rounded-xl border border-amber-200/90 bg-white px-4 py-3.5 text-base outline-none ring-amber-200/80 transition focus:border-amber-300 focus:ring-2 focus:ring-amber-200/80 sm:py-4 sm:text-lg"
+                          />
+                        </div>
+                        <button
+                          ref={adventureCtaRef}
+                          type="submit"
+                          disabled={isCheckingStudentProgress || isNicknameLookupBusy}
+                          data-landing-adventure-cta
+                          className="landing-cta-btn-size inline-flex w-full items-center justify-center rounded-xl bg-gradient-to-r from-amber-400 to-orange-500 px-4 font-bold text-white shadow-md shadow-orange-400/30 transition hover:brightness-105 active:translate-y-px disabled:opacity-60"
+                        >
+                          {isNicknameLookupBusy ? '기록 확인 중…' : '🪄 모험 시작'}
+                        </button>
+                        <button
+                          type="button"
+                          onClick={handleDifferentUser}
+                          className="landing-cta-btn-size inline-flex w-full items-center justify-center rounded-xl border border-slate-200/90 bg-white px-4 text-sm font-semibold text-slate-600 transition hover:bg-slate-50 hover:text-slate-800 sm:text-base"
+                        >
+                          👤 다른 학생으로 시작
+                        </button>
+                      </form>
+                    </div>
                   </div>
-                  <div className="flex min-h-[85px] shrink-0 flex-col justify-center bg-black px-3 py-3 sm:min-h-[90px]">
-                    <p className="text-center text-xl font-black tracking-wide text-yellow-300 [text-shadow:0_2px_4px_rgba(0,0,0,0.7)] sm:text-2xl lg:text-3xl">
-                      수식 마법으로 세상을 구하라!
-                    </p>
+
+                  <div className="order-1 flex min-h-0 w-full min-w-0 lg:order-2">
+                    <div className="flex h-full min-h-[17.5rem] w-full flex-col overflow-hidden rounded-2xl border border-blue-200/65 shadow-md shadow-blue-300/15 ring-1 ring-blue-100/60 sm:min-h-[18.5rem] lg:min-h-0">
+                      <div className="relative min-h-0 flex-1 overflow-hidden">
+                        <img
+                          src={magicMainIllustration}
+                          alt="수학마법 캐릭터"
+                          className="h-full w-full object-cover object-center"
+                        />
+                        <div className="pointer-events-none absolute inset-0 bg-gradient-to-t from-black/30 via-transparent to-black/10" />
+                      </div>
+                      <div className="flex min-h-[4.5rem] shrink-0 flex-col justify-center bg-black/95 px-3 py-2.5 sm:min-h-[5.25rem]">
+                        <p className="text-center text-[1.3125rem] font-bold leading-snug tracking-wide text-yellow-300/95 sm:text-2xl">
+                          수식 마법으로 세상을 구하라!
+                        </p>
+                      </div>
+                    </div>
                   </div>
                 </div>
-              </div>
+              </>
             )}
 
-            <div className="mt-8">
-              {studentFlowStep === 'nickname' && (
-                <div className="mx-auto w-full max-w-lg rounded-2xl border border-yellow-300 bg-white/90 p-6 shadow-lg shadow-yellow-400/15">
-                  <h2 className="text-xl font-extrabold text-yellow-600">학생용 입장</h2>
-                  <form className="mt-4 space-y-3" onSubmit={handleNicknameStepSubmit}>
-                    <p className="text-sm text-slate-600">모험에 사용할 닉네임을 입력하세요.</p>
-                    <label className="block text-sm font-semibold text-slate-700" htmlFor="nickname">
-                      닉네임
-                    </label>
-                    <input
-                      id="nickname"
-                      type="text"
-                      value={studentNickname}
-                      onChange={(event) => setStudentNickname(event.target.value)}
-                      placeholder="예: 방정식탐험가"
-                      autoComplete="username"
-                      className="w-full rounded-xl border border-yellow-300 bg-white px-4 py-3 text-base outline-none ring-yellow-300 transition focus:ring-2"
-                    />
-                    <button
-                      type="submit"
-                      disabled={isCheckingStudentProgress || isNicknameLookupBusy}
-                      className="w-full rounded-xl bg-gradient-to-r from-yellow-400 to-amber-500 px-4 py-3 text-base font-bold text-slate-900 shadow-lg shadow-yellow-500/30 transition hover:brightness-105 active:translate-y-px disabled:opacity-60"
-                    >
-                      {isNicknameLookupBusy ? '기록 확인 중…' : '다음'}
-                    </button>
-                    <button
-                      type="button"
-                      onClick={handleDifferentUser}
-                      className="w-full rounded-xl border border-slate-200 bg-white px-4 py-2 text-sm font-bold text-slate-600 transition hover:bg-slate-50"
-                    >
-                      다른 사용자로 접속
-                    </button>
-                  </form>
-                </div>
-              )}
-
-              {studentFlowStep === 'classCode' && (
+            {studentFlowStep === 'classCode' && (
                 <div className="mx-auto w-full max-w-5xl rounded-2xl border border-slate-200/90 bg-white/95 p-6 shadow-lg sm:p-8">
                   <h2 className="text-2xl font-black text-blue-950 sm:text-3xl">나의 선생님</h2>
                   <p className="mt-2 max-w-3xl text-sm leading-relaxed text-slate-600 sm:text-base">
@@ -1188,7 +1331,7 @@ export default function App() {
                         onClick={handleDifferentUser}
                         className="mt-4 text-sm font-bold text-blue-700 underline-offset-2 hover:underline"
                       >
-                        다른 사용자로 접속
+                        다른 학생으로 시작
                       </button>
                     </div>
 
@@ -1220,35 +1363,43 @@ export default function App() {
                   </div>
                 </div>
               )}
-            </div>
 
             {studentFlowStep !== 'classCode' && (
-              <section className="mt-10 rounded-2xl border border-blue-300 bg-white/85 p-5 shadow-lg shadow-blue-400/20 sm:p-6 lg:mt-12">
-                <h2 className="text-xl font-extrabold text-blue-700">교사용 입장</h2>
-                <p className="mt-2 text-sm text-slate-600">
-                  Google 로그인으로 선생님 인증 후 관리자 계정에 입장합니다.
+              <div className="mt-8 rounded-2xl border border-blue-200/55 bg-blue-50/45 px-4 py-4 sm:px-5 sm:py-4 lg:mt-9">
+                <h3 className="text-base font-bold text-blue-800 sm:text-[1.05rem]">
+                  👥 교사용 입장 · 관리자 도구
+                </h3>
+                <p className="mt-1 text-sm text-slate-500">
+                  교사 로그인 후 관리자 대시보드로 이동합니다.
                 </p>
-                <div className="mt-4 space-y-3">
-                  <p className="text-sm font-semibold text-slate-700">Google Teacher Sign-In</p>
-                  <div ref={googleBtnRef} className="min-h-11" />
-                  {teacherAuthError && <p className="text-sm font-semibold text-red-600">{teacherAuthError}</p>}
-                  {teacherProfile && (
-                    <div className="rounded-xl border border-blue-200 bg-blue-50 px-3 py-2 text-sm">
-                      <p className="font-bold text-blue-800">{teacherProfile.name}</p>
-                      <p className="text-blue-700">{teacherProfile.email}</p>
+                {teacherProfile && (
+                  <div className="mt-3 rounded-lg border border-blue-200/80 bg-white/80 px-3 py-2 text-xs">
+                        <p className="font-bold text-blue-800">{teacherProfile.name}</p>
+                        <p className="text-blue-700">{teacherProfile.email}</p>
+                      </div>
+                )}
+                {teacherAuthError && (
+                  <p className="mt-2 text-xs font-semibold text-red-600">{teacherAuthError}</p>
+                )}
+                <div className="landing-teacher-btn-row landing-teacher-btn-row--single mt-4 w-full">
+                  <div className="landing-teacher-google-wrap landing-cta-btn-size relative w-full">
+                    <div
+                      className="landing-teacher-google-face pointer-events-none flex h-full w-full items-center justify-center gap-2 rounded-xl bg-[#1a73e8] px-4 font-bold text-white shadow-md shadow-blue-600/25"
+                      aria-hidden
+                    >
+                      <span className="inline-flex h-5 w-5 shrink-0 items-center justify-center rounded-sm bg-white text-xs font-black text-[#4285F4]">
+                        G
+                      </span>
+                      Google 계정으로 로그인
                     </div>
-                  )}
-                  <button
-                    type="button"
-                    onClick={handleTeacherDashboardEnter}
-                    disabled={!teacherProfile}
-                    className="w-full rounded-xl bg-gradient-to-r from-blue-500 to-indigo-600 px-4 py-3 text-base font-bold text-white shadow-lg shadow-blue-500/35 transition hover:brightness-105 active:translate-y-px disabled:cursor-not-allowed disabled:opacity-50"
-                  >
-                    관리자 대시보드 입장
-                  </button>
-                  <p className="text-xs text-slate-500">교사 인증 후에만 대시보드 메뉴가 활성화됩니다.</p>
+                    <div
+                      ref={googleBtnRef}
+                      className="landing-google-signin-host absolute inset-0 z-[2] h-full w-full min-w-0 opacity-0"
+                      aria-label="Google 계정으로 로그인"
+                    />
+                  </div>
                 </div>
-              </section>
+              </div>
             )}
           </section>
         )}
@@ -1522,7 +1673,7 @@ export default function App() {
                             >
                               <h5 className="text-sm font-bold text-violet-950">문제별 AI 분석 결과</h5>
                               <p className="mt-2 text-sm leading-relaxed text-slate-700">
-                                선택한 문제의 학습 데이터를 바탕으로 어려움이 나타난 지점과 지도 방향을 제안합니다.
+                                선택한 문제의 통계를 바탕으로 한 짧은 수업 분석 메모입니다.
                               </p>
                               <div className="mt-3 grid grid-cols-1 gap-3 lg:grid-cols-2">
                                 <section className="rounded-lg border border-violet-200/80 bg-white px-3 py-3">
@@ -1538,7 +1689,7 @@ export default function App() {
                                   </p>
                                 </section>
                                 <section className="rounded-lg border border-violet-200/80 bg-white px-3 py-3">
-                                  <h6 className="text-sm font-bold text-violet-950">3. 오개념 추정</h6>
+                                  <h6 className="text-sm font-bold text-violet-950">3. 개념 초점</h6>
                                   <p className="mt-1 text-xs leading-relaxed text-slate-700">
                                     {adminProblemAnalysisDraft.misconception}
                                   </p>

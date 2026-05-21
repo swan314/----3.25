@@ -42,7 +42,7 @@ combine_like_terms,practice,4x-2x=4-6,2x=-2
 combine_like_terms,practice,5x+x=-1-5,6x=-6
 combine_like_terms,practice,3x-x=2+3,2x=5
 combine_like_terms,practice,2x+3x=10-7,5x=3
-combine_like_terms,practice,x-3x=-4+6,(-2)x=2
+combine_like_terms,practice,x-3x=-4+6,-2x=2
 divide_coefficient,explanation,"양변을 x의 계수로 나누어 x=(수)의 꼴로 나타내요
 red[음수로 나눌때는 부호를 주의해야해요]",skip
 divide_coefficient,example,"① 5x=-10
@@ -50,6 +50,6 @@ divide_coefficient,example,"① 5x=-10
 ② x=2"
 divide_coefficient,practice,2x=-8,x=-4
 divide_coefficient,practice,3x=-6,x=-2
-divide_coefficient,practice,(-5)x=-15,x=3
+divide_coefficient,practice,-5x=-15,x=3
 divide_coefficient,practice,4x=-8,x=-2
-divide_coefficient,practice,(-2)x=-10,x=5
+divide_coefficient,practice,-2x=-10,x=5

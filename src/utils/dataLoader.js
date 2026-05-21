@@ -1,4 +1,5 @@
 import Papa from 'papaparse'
+import { normalizeTrainingPedagogyFields } from '../training/trainingProblemMeta.js'
 
 const DEFAULT_TRAINING_CSV_PATH = '/data/training_problems_with_similar_v2.csv'
 const DEFAULT_MATH_CARDS_CSV_PATH = '/data/math_cards.csv'
@@ -127,7 +128,9 @@ export async function loadTrainingCsvRows(csvPath = DEFAULT_TRAINING_CSV_PATH) {
   if (/training_problems/i.test(fileName)) {
     const fields = parsed.meta?.fields ?? []
     let rowsWithKeyword = normalizedRows.map((row, idx) =>
-      attachKeywordFromLastColumn(row, fields, rawRows[idx])
+      normalizeTrainingPedagogyFields(
+        attachKeywordFromLastColumn(row, fields, rawRows[idx]),
+      ),
     )
     const hasAnyKeyword = rowsWithKeyword.some((row) => String(row?.keyword ?? '').trim())
     if (!hasAnyKeyword) {
