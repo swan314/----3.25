@@ -227,7 +227,7 @@ export function normalizeLooseAnswer(s) {
     .replace(/\\left|\\right/g, '')
     .replace(/\\times|\\cdot/g, '*')
     .replace(/\\frac\s*\{([^{}]+)\}\s*\{([^{}]+)\}/g, '($1)/($2)')
-    .replace(/\s+/g, '')
+    .replace(/[\s\u00a0\u2000-\u200b\u202f\u205f\u3000]+/g, '')
     .replace(/[−–]/g, '-')
     .replace(/,/g, '')
     .toLowerCase()
@@ -798,8 +798,17 @@ export function parseExpectedAnswerAlternatives(raw) {
   return single ? [single] : []
 }
 
+/**
+ * 계수×괄호 암시 곱만 명시: 2(3x+2) → 2*(3x+2)
+ * (3x+2)2 처럼 괄호 뒤 숫자는 변환하지 않음 (오답 유지)
+ */
+function insertCoefficientBeforeParenthesisMultiplication(s) {
+  return String(s ?? '').replace(/(\d)\(/g, '$1*(')
+}
+
 function normalizeEquationSide(t) {
   let s = normalizeLooseAnswer(t).replace(/[{}[\]]/g, '').replace(/×/g, '*')
+  s = insertCoefficientBeforeParenthesisMultiplication(s)
   s = s.replace(/(\d)([a-z])/gi, '$1*$2')
   return s
 }
@@ -1083,7 +1092,9 @@ function looksLikeMathExpression(raw) {
 
 /**
  * 수학식 동치 비교:
+ * - 띄어쓰기·전각 공백 차이는 무시
  * - 덧셈·곱셈·분수식은 교환·결합법칙으로 정규화 후 비교
+ * - 2(3x+2), 2*(3x+2), (3x+2)*2 동치 / (3x+2)2 는 비동치
  * - 방정식은 좌우 교환·양변 부호 반전·이항 동치
  * - 포함 비교는 사용하지 않음
  */

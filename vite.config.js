@@ -2,27 +2,28 @@ import { resolve } from 'path'
 import { defineConfig, loadEnv } from 'vite'
 import react from '@vitejs/plugin-react'
 import tailwindcss from '@tailwindcss/vite'
+import { gasDevProxyPlugin } from './vite-gas-dev-proxy.js'
 
 export default defineConfig(({ mode }) => {
   const env = loadEnv(mode, process.cwd(), '')
   const gasUrl = (env.VITE_API_URL || '').trim()
-  let proxy = {}
-  if (gasUrl) {
+  const plugins = [react(), tailwindcss()]
+  if (mode === 'development' && gasUrl) {
     try {
-      const u = new URL(gasUrl)
-      const pathOnly = u.pathname + u.search
-      proxy['/api/gas'] = {
-        target: u.origin,
-        changeOrigin: true,
-        rewrite: () => pathOnly,
-      }
-    } catch {
-      // ignore invalid VITE_API_URL
+      new URL(gasUrl)
+      plugins.push(gasDevProxyPlugin(gasUrl))
+      console.log('[vite] /api/gas dev proxy →', gasUrl)
+    } catch (e) {
+      console.warn('[vite] VITE_API_URL 파싱 실패:', e?.message || e)
     }
+  } else if (mode === 'development') {
+    console.warn(
+      '[vite] VITE_API_URL이 비어 있습니다. .env에 Apps Script Web App URL을 설정하세요.',
+    )
   }
   return {
-    plugins: [react(), tailwindcss()],
-    server: { proxy },
+    plugins,
+    server: {},
     build: {
       rollupOptions: {
         input: {

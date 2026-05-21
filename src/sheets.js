@@ -34,9 +34,9 @@ export const API_URL = (import.meta.env.VITE_API_URL || '').toString().trim()
 export const AI_FEEDBACK_STORAGE_MAX_CHARS = 50000
 
 /**
- * 로컬 개발에서만 `VITE_API_PROXY=/api/gas`(vite.config 프록시)로 POST JSON 응답 수신.
- * 프로덕션 빌드에서는 항상 `VITE_API_URL` → CORS 시 JSONP 폴백.
- * 관리자 문제 분석 등 JSON 응답이 필요한 POST에도 동일 URL 사용.
+ * 로컬 개발에서만 `VITE_API_PROXY=/api/gas`(vite.config 프록시)로 일부 POST JSON 수신(AI 등).
+ * 프로덕션 빌드에서는 `VITE_API_URL`(Netlify 빌드 시 env 주입) 직결.
+ * 관리자 `create_class`는 GET `API_URL`(클래스 목록 조회와 동일). POST는 AI 등만 `/api/gas` 프록시.
  */
 export function resolveGasWebhookPostUrl() {
   const p = (import.meta.env.VITE_API_PROXY || '').toString().trim()
@@ -1794,31 +1794,47 @@ export async function fetchTeacherClasses(teacherEmail) {
  * 응답: { result: 'success' | 'exists' | 'error', class?: { ... }, message?: string }
  */
 export async function createTeacherClass(teacherEmail, classCode, className) {
-  const url = resolveAiFeedbackPostUrl()
+  const gasTarget = API_URL
   const email = normalizeTeacherEmailForCompare(teacherEmail)
   const code = normalizeClassCode(classCode)
   const name = String(className || '').trim()
+  const payload = {
+    action: 'create_class',
+    teacherEmail: email,
+    classCode: code,
+    className: name,
+  }
 
-  if (!url) return { ok: false, reason: 'missing_api_url', message: '' }
+  if (!gasTarget) {
+    return {
+      ok: false,
+      reason: 'missing_api_url',
+      message: 'VITE_API_URL(Apps Script Web App URL)이 설정되지 않았습니다.',
+    }
+  }
   if (!email || !code || !name) {
     return { ok: false, reason: 'missing_params', message: 'teacherEmail, classCode, className이 필요합니다.' }
   }
 
+  const q = new URLSearchParams({
+    action: 'create_class',
+    teacherEmail: email,
+    classCode: code,
+    className: name,
+  })
+  const url = `${gasTarget}?${q.toString()}`
+
+  console.log('[create_class] url:', url)
+  console.log('[create_class] payload:', payload)
+
   try {
-    console.log('[admin] create_class POST route:', url)
-    const res = await fetch(url, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        action: 'create_class',
-        teacherEmail: email,
-        classCode: code,
-        className: name,
-      }),
-    })
+    const res = await fetch(url, { method: 'GET' })
     const raw = await res.text()
     const data = parseJsonLoose(raw)
     const result = String(data?.result || '').toLowerCase()
+    if (!res.ok) {
+      console.warn('[create_class] http_error', res.status, raw?.slice(0, 500))
+    }
     if (res.ok && (result === 'success' || result === 'exists')) {
       return {
         ok: true,
@@ -1833,12 +1849,13 @@ export async function createTeacherClass(teacherEmail, classCode, className) {
       message: String(data?.message || ''),
     }
   } catch (error) {
+    console.error('[create_class] network_error', error)
     return {
       ok: false,
       reason: 'network_error',
       message:
         error?.message ||
-        '네트워크 오류(개발환경에서는 VITE_API_PROXY=/api/gas 프록시 설정 확인 필요)',
+        '네트워크 오류 — 로컬은 dev 서버 재시작·VITE_API_PROXY=/api/gas, 배포는 Netlify VITE_API_URL 확인',
     }
   }
 }

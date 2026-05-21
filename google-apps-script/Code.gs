@@ -182,6 +182,15 @@ function doGet(e) {
     if (action === 'class_problem_stats') {
       return jsonResponse(handleClassProblemStatsGet_(p));
     }
+    if (action === 'create_class') {
+      return jsonResponse(
+        handleCreateClassPost_({
+          teacherEmail: p.teacherEmail,
+          classCode: p.classCode,
+          className: p.className,
+        })
+      );
+    }
     if (mode === 'classes') {
       return jsonOut(handleAdminClassesModeGet_(p));
     }
