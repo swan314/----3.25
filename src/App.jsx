@@ -94,37 +94,11 @@ function measureGoogleRenderWidth(buttonHost) {
   return Math.max(slotWidth, 200)
 }
 
-/** Google GSI 버튼을 옆 관리자 CTA와 동일한 너비·높이로 맞춤 */
-function syncGoogleSignInButtonFit(buttonHost) {
-  const inner = buttonHost.firstElementChild
-  const iframe = buttonHost.querySelector('iframe')
-  if (!(inner instanceof HTMLElement) || !(iframe instanceof HTMLElement)) return
-
-  const wrap = buttonHost.closest('.landing-teacher-google-wrap')
-  const face = wrap?.querySelector('.landing-teacher-google-face')
-  const faceRect = face?.getBoundingClientRect()
-
-  const targetW = faceRect?.width || buttonHost.getBoundingClientRect().width
-  const targetH = faceRect?.height || buttonHost.getBoundingClientRect().height
-  const actualW = iframe.getBoundingClientRect().width
-  const actualH = iframe.getBoundingClientRect().height
-  if (!targetW || !actualW || !actualH || !targetH) return
-
-  const boxW = wrap?.getBoundingClientRect().width || targetW
-  const boxH = faceRect?.height || targetH
-
-  buttonHost.style.width = `${boxW}px`
-  buttonHost.style.minWidth = `${boxW}px`
-  buttonHost.style.maxWidth = `${boxW}px`
-  buttonHost.style.height = `${boxH}px`
-  buttonHost.style.minHeight = `${boxH}px`
-  buttonHost.style.maxHeight = `${boxH}px`
-
-  inner.style.width = `${actualW}px`
-  inner.style.height = `${actualH}px`
-  inner.style.maxWidth = 'none'
-  inner.style.transformOrigin = '0 50%'
-  inner.style.transform = `scale(${boxW / actualW}, ${boxH / actualH})`
+function googleOriginSetupHint() {
+  const origin = typeof window !== 'undefined' ? window.location.origin : ''
+  return origin
+    ? `Google Cloud Console → OAuth 클라이언트 → 「승인된 JavaScript 원본」에 ${origin} 을 추가한 뒤 저장·몇 분 후 다시 시도하세요.`
+    : 'Google Cloud Console에서 이 사이트 주소를 승인된 JavaScript 원본에 추가하세요.'
 }
 
 /** 관리자 학생 목록 레벨 필터 (문자열 레벨과 매칭) */
@@ -234,6 +208,7 @@ export default function App() {
   const adventureCtaRef = useRef(/** @type {HTMLButtonElement | null} */ (null))
   const landingSectionRef = useRef(/** @type {HTMLElement | null} */ (null))
   const lastGoogleRenderWidthRef = useRef(0)
+  const googleInitDebounceRef = useRef(0)
   const getLevelFromPlan = (plan) =>
     resolveCanonicalDiagnosticTier(plan?.diagnosticRecord?.level || plan?.diagnosticTier || '하')
 
@@ -514,13 +489,21 @@ export default function App() {
       const buttonHost = googleBtnRef.current
       if (!buttonHost) return
 
-      console.log(window.location.origin)
+      const origin = window.location.origin
+      console.log('[teacher] Google Sign-In origin:', origin)
 
       window.google.accounts.id.initialize({
         client_id: clientId,
+        auto_select: false,
+        use_fedcm_for_prompt: false,
+        itp_support: true,
         callback: (response) => {
+          if (!response?.credential) {
+            setTeacherAuthError('구글 로그인이 취소되었거나 자격 증명을 받지 못했습니다.')
+            return
+          }
           const payload = decodeJwtPayload(response.credential)
-          if (!payload) {
+          if (!payload?.email) {
             setTeacherAuthError('구글 로그인 처리 중 오류가 발생했습니다.')
             return
           }
@@ -537,7 +520,10 @@ export default function App() {
       })
 
       buttonHost.innerHTML = ''
-      const renderWidth = measureGoogleRenderWidth(buttonHost)
+      const wrap = buttonHost.closest('.landing-teacher-google-wrap')
+      wrap?.classList.remove('landing-teacher-google-wrap--gsi-ready')
+
+      const renderWidth = Math.min(Math.max(measureGoogleRenderWidth(buttonHost), 200), 400)
       lastGoogleRenderWidthRef.current = renderWidth
       window.google.accounts.id.renderButton(buttonHost, {
         theme: 'filled_blue',
@@ -548,9 +534,17 @@ export default function App() {
         locale: 'ko',
       })
 
-      requestAnimationFrame(() => {
-        requestAnimationFrame(() => syncGoogleSignInButtonFit(buttonHost))
-      })
+      window.setTimeout(() => {
+        const iframe = buttonHost.querySelector('iframe')
+        if (iframe) {
+          wrap?.classList.add('landing-teacher-google-wrap--gsi-ready')
+          setTeacherAuthError('')
+        } else {
+          setTeacherAuthError(
+            `Google 로그인 버튼을 불러오지 못했습니다. ${googleOriginSetupHint()}`,
+          )
+        }
+      }, 1200)
     }
 
     if (existingScript) {
@@ -577,13 +571,13 @@ export default function App() {
 
     const refreshGoogleButtonLayout = () => {
       const buttonHost = googleBtnRef.current
-      if (!buttonHost) return
-      syncGoogleSignInButtonFit(buttonHost)
-      if (!window.google?.accounts?.id) return
+      if (!buttonHost || !window.google?.accounts?.id) return
       const renderWidth = measureGoogleRenderWidth(buttonHost)
-      if (renderWidth !== lastGoogleRenderWidthRef.current) {
+      if (Math.abs(renderWidth - lastGoogleRenderWidthRef.current) < 12) return
+      window.clearTimeout(googleInitDebounceRef.current)
+      googleInitDebounceRef.current = window.setTimeout(() => {
         initializeGoogle()
-      }
+      }, 250)
     }
 
     const resizeObserver =
@@ -601,6 +595,7 @@ export default function App() {
     window.addEventListener('resize', refreshGoogleButtonLayout)
 
     return () => {
+      window.clearTimeout(googleInitDebounceRef.current)
       resizeObserver?.disconnect()
       window.removeEventListener('resize', refreshGoogleButtonLayout)
     }
@@ -1394,7 +1389,7 @@ export default function App() {
                     </div>
                     <div
                       ref={googleBtnRef}
-                      className="landing-google-signin-host absolute inset-0 z-[2] h-full w-full min-w-0 opacity-0"
+                      className="landing-google-signin-host w-full min-w-0"
                       aria-label="Google 계정으로 로그인"
                     />
                   </div>

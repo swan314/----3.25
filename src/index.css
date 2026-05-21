@@ -274,37 +274,31 @@ body {
   line-height: inherit;
 }
 
-/* 보이는 Google face와 동일 영역 — 투명 공식 버튼이 클릭 처리 (모든 화면 너비) */
+/* Google 공식 로그인 버튼 — 클릭 영역 유지 (opacity 0·scale 제거) */
 .landing-teacher-google-wrap .landing-google-signin-host {
-  position: absolute;
-  inset: 0;
-  z-index: 2;
   display: flex;
-  width: 100% !important;
-  min-width: 0 !important;
-  max-width: none !important;
-  height: 100% !important;
-  min-height: 100% !important;
-  max-height: none !important;
+  width: 100%;
+  min-height: 3rem;
   box-sizing: border-box;
-  align-items: stretch;
-  justify-content: flex-start;
+  align-items: center;
+  justify-content: center;
   overflow: hidden;
   padding: 0;
-  opacity: 0;
-  cursor: pointer;
+}
+
+.landing-teacher-google-wrap--gsi-ready .landing-teacher-google-face {
+  display: none;
 }
 
 .landing-teacher-btn-row .landing-google-signin-host > div {
   display: flex !important;
-  flex-shrink: 0;
-  align-items: center;
-  justify-content: flex-start;
-  transform-origin: 0 50%;
+  width: 100% !important;
+  justify-content: center !important;
 }
 
 .landing-teacher-btn-row .landing-google-signin-host iframe {
   display: block !important;
-  margin: 0 !important;
+  margin: 0 auto !important;
   border-radius: 0.75rem !important;
+  pointer-events: auto !important;
 }
