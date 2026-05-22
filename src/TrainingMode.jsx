@@ -620,7 +620,7 @@ export default function TrainingMode({
     setIsScratchPadOpen(false)
     blankInputRefs.current = {}
     startedProblemKeySetRef.current = new Set()
-    setTrainingAllComplete(false)
+    setTrainingAllComplete(Boolean(trainingPlan?.openTrainingCompleteScreen))
     setCompletionEncouragement('')
     setPendingSavePayload(null)
     setTrainingAiFeedback('')
@@ -654,6 +654,7 @@ export default function TrainingMode({
     trainingPlan?.launchedAt,
     trainingPlan?.failedProblems,
     trainingPlan?.completedProblems,
+    trainingPlan?.openTrainingCompleteScreen,
     learnerNickname,
     learnerClassCode,
   ])
@@ -1896,6 +1897,22 @@ export default function TrainingMode({
     setTrainingAllComplete(true)
     setRetryChallengeDialog(null)
   }, [])
+
+  useEffect(() => {
+    if (isLoading || trainingAllComplete) return
+    if (trainingSessionActive || isResultView) return
+    const fromPlan = trainingPlan?.openTrainingCompleteScreen === true
+    if (!fromPlan && !allFifteenTrainingCodesComplete) return
+    transitionToTrainingComplete()
+  }, [
+    isLoading,
+    trainingAllComplete,
+    trainingSessionActive,
+    isResultView,
+    trainingPlan?.openTrainingCompleteScreen,
+    allFifteenTrainingCodesComplete,
+    transitionToTrainingComplete,
+  ])
 
   const handleBackToCardBoard = useCallback(async () => {
     setIsResultView(false)

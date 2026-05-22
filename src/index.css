@@ -263,11 +263,18 @@ body {
   min-width: 0;
 }
 
+.landing-teacher-google-wrap:has(.landing-google-signin-host iframe) .landing-teacher-google-face {
+  display: none;
+}
+
 .landing-teacher-google-wrap.landing-cta-btn-size {
   display: block;
 }
 
 .landing-teacher-google-face {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
   box-sizing: border-box;
   border-radius: 0.75rem;
   font-size: inherit;
@@ -276,6 +283,8 @@ body {
 
 /* Google 공식 로그인 버튼 — 클릭 영역 유지 (opacity 0·scale 제거) */
 .landing-teacher-google-wrap .landing-google-signin-host {
+  position: relative;
+  z-index: 1;
   display: flex;
   width: 100%;
   min-height: 3rem;

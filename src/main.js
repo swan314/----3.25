@@ -11,7 +11,8 @@ import {
   getCharacterNameForTier,
   MM_TRAINING_LAUNCH_KEY,
 } from './levelConfig.js'
-import { clearAllStudentLocalSession } from './studentPersist.js'
+import { clearAllStudentLocalSession, readStoredLearner } from './studentPersist.js'
+import { downloadElementAsPdf } from './utils/downloadPdf.js'
 
 const app = document.querySelector('#app')
 const API_URL = (import.meta.env.VITE_API_URL || '').toString().trim()
@@ -103,7 +104,11 @@ function toSheetRowPayload(payload = {}) {
 }
 
 function getStudentNicknameFromHash() {
-  return readStudentQueryParams().nickname
+  const fromHash = (readStudentQueryParams().nickname || '').trim()
+  if (fromHash) return fromHash
+  const fromStorage = (readStoredLearner()?.nickname || '').trim()
+  if (fromStorage) return fromStorage
+  return (window.__mmAssessment?.studentNickname || '').trim()
 }
 
 function getStudentClassCodeFromHash() {
@@ -169,7 +174,7 @@ function renderWelcome() {
         </div>
 
         <h1 class="mm-welcome-heading" id="mm-welcome-heading">
-          일차방정식 문장제, 시작해볼까요?
+          일차방정식 문장제 문제, 시작해볼까요?
         </h1>
 
         <p class="mm-welcome-desc">
@@ -228,6 +233,10 @@ function renderLevelCheckPlaceholder(problemIdx = 0) {
   }
   if (window.__mmAssessment.reportedFinalCompletion == null) {
     window.__mmAssessment.reportedFinalCompletion = false
+  }
+  const seedNickname = getStudentNicknameFromHash()
+  if (seedNickname) {
+    window.__mmAssessment.studentNickname = seedNickname
   }
   const problems = [
     {
@@ -1850,6 +1859,12 @@ function renderLevelCheckPlaceholder(problemIdx = 0) {
     }
     const av = levelAvatarImg[level]
     const avatarInner = `<img src="${av.src}" alt="${escapeHtml(av.alt)}" class="mm-final-avatar-img" width="240" height="240" />`
+    const studentNickname = (getStudentNicknameFromHash() || '').trim()
+    const nicknameForDisplay =
+      studentNickname && studentNickname !== '익명' ? studentNickname : ''
+    const nicknameHtml = nicknameForDisplay
+      ? `<p class="mm-final-nickname">${escapeHtml(nicknameForDisplay)}님</p>`
+      : ''
 
     app.innerHTML = `
     <div class="mm-shell" role="application" aria-label="math-master">
@@ -1867,11 +1882,13 @@ function renderLevelCheckPlaceholder(problemIdx = 0) {
       </div>
       <main class="mm-main">
         <section class="mm-result-card mm-final-wrap">
+          <div id="mm-diagnostic-pdf-root">
           <div class="mm-final-hero mm-final-hero-split" role="region" aria-label="진단 결과 요약">
             <div class="mm-final-hero-left">
               <div class="mm-final-avatar">${avatarInner}</div>
             </div>
             <div class="mm-final-hero-text">
+              ${nicknameHtml}
               <p class="mm-final-tier mm-final-tier-line1">당신의 레벨은</p>
               <p class="mm-final-tier mm-final-tier-line2">${escapeHtml(activeProfile.headline)} 입니다</p>
               <p class="mm-final-desc">${escapeHtml(activeProfile.summary)}</p>
@@ -1907,7 +1924,9 @@ function renderLevelCheckPlaceholder(problemIdx = 0) {
               <div class="mm-score-points">${total}/${totalMax}</div>
             </div>
           </div>
+          </div>
           <div class="mm-result-actions">
+            <button type="button" class="mm-btn-secondary mm-btn-w100" id="mm-diagnostic-pdf">PDF 저장</button>
             <button type="button" class="mm-btn-primary mm-btn-w100" id="mm-start-training">${escapeHtml(getCharacterNameForTier(level))}의 수련 시작하기</button>
             <button type="button" class="mm-btn-secondary mm-btn-w100" id="mm-exit-diagnostic">나가기</button>
           </div>
@@ -1915,6 +1934,17 @@ function renderLevelCheckPlaceholder(problemIdx = 0) {
       </main>
     </div>`
 
+    app.querySelector('#mm-diagnostic-pdf')?.addEventListener('click', async () => {
+      const root = app.querySelector('#mm-diagnostic-pdf-root')
+      if (!root) return
+      const nick = (getStudentNicknameFromHash() || '학습자').replace(/[<>:"/\\|?*]+/g, '_')
+      try {
+        await downloadElementAsPdf(root, `${nick}-진단평가-결과.pdf`, { preserveStyles: true })
+      } catch (err) {
+        console.error('[diagnostic-pdf]', err)
+        alert('PDF 저장에 실패했습니다. 잠시 후 다시 시도해 주세요.')
+      }
+    })
     app.querySelector('#mm-start-training')?.addEventListener('click', () => {
       const launch = {
         ...createTrainingLaunchFromDiagnostic(
@@ -2133,8 +2163,20 @@ function renderLevelCheckPlaceholder(problemIdx = 0) {
       app.querySelector('#mm-next-problem')?.addEventListener('click', () => {
         renderLevelCheckPlaceholder(problemIdx + 1)
       })
-      app.querySelector('#mm-final-achievement')?.addEventListener('click', () => {
-        renderFinalAchievementTable()
+      app.querySelector('#mm-final-achievement')?.addEventListener('click', async (e) => {
+        const btn = e.currentTarget
+        if (!(btn instanceof HTMLButtonElement) || btn.disabled) return
+        btn.disabled = true
+        btn.setAttribute('aria-busy', 'true')
+        btn.textContent = '레벨을 판정중입니다...'
+        try {
+          await renderFinalAchievementTable()
+        } catch (err) {
+          console.error('[final-achievement]', err)
+          btn.disabled = false
+          btn.removeAttribute('aria-busy')
+          btn.textContent = '최종 성취 보기'
+        }
       })
       app.querySelector('#mm-home-link')?.addEventListener('click', (e) => {
         e.preventDefault()

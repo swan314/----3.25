@@ -1,3 +1,4 @@
+import { LEVEL_PROBLEM_SETS, resolveCanonicalDiagnosticTier } from '../levelConfig'
 import { normalizeTrainingKind } from './trainingRowSelect'
 import {
   countFailCountFromPackedScores,
@@ -248,6 +249,25 @@ export function countCompletedProblemsForMathCards(trainingProblemProgressByCode
   return Object.values(trainingProblemProgressByCode).filter((v) =>
     isProblemProgressSuccess(v),
   ).length
+}
+
+/** 티어 수련 15문항(5×3) 전부 성공 완료 여부 — 재입장 시 수련 완료 화면 직행 판별 */
+export function isAllTierTrainingProblemsComplete(trainingProblemProgressByCode, tierKeyRaw) {
+  const tier = resolveCanonicalDiagnosticTier(tierKeyRaw)
+  const sets = LEVEL_PROBLEM_SETS[tier] || LEVEL_PROBLEM_SETS.하
+  const codes = new Set()
+  for (const setRow of sets) {
+    for (const raw of setRow || []) {
+      const code = String(raw || '').trim().toUpperCase()
+      if (code) codes.add(code)
+    }
+  }
+  if (codes.size === 0) return false
+  const map = trainingProblemProgressByCode || {}
+  for (const code of codes) {
+    if (!isProblemProgressSuccess(map[code])) return false
+  }
+  return true
 }
 
 function mergeLatestByTypeForProblem(prevEntry, remoteEntry) {

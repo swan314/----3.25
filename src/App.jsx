@@ -54,8 +54,10 @@ import {
 import {
   countCompletedProblemsForMathCards,
   applySheetProblemOutcomeLists,
+  isAllTierTrainingProblemsComplete,
   mergeTrainingProblemProgressMaps,
 } from './training/trainingProblemProgress'
+import { isLatestRecordAtTierCurriculumEnd } from './training/trainingResumeFromSheet'
 import { readStoredTrainingProblemProgress, writeStoredTrainingProblemProgress } from './studentPersist'
 
 function decodeJwtPayload(token) {
@@ -209,6 +211,8 @@ export default function App() {
   const landingSectionRef = useRef(/** @type {HTMLElement | null} */ (null))
   const lastGoogleRenderWidthRef = useRef(0)
   const googleInitDebounceRef = useRef(0)
+  /** 공식 GSI 버튼이 한 번이라도 뜬 뒤에는 로딩용 가짜 버튼을 다시 보이지 않음 */
+  const googleGsiReadyRef = useRef(false)
   const getLevelFromPlan = (plan) =>
     resolveCanonicalDiagnosticTier(plan?.diagnosticRecord?.level || plan?.diagnosticTier || '하')
 
@@ -264,6 +268,12 @@ export default function App() {
       )
       writeStoredTrainingProblemProgress(nick, cc, progressMap)
       const trainingProgressMapByProblem = progress.trainingProgressMapByProblem || {}
+      const tierKey = String(
+        progress.diagnosticTier || progress.diagnosticRecord?.level || resumeBase.diagnosticTier || '하',
+      ).trim() || '하'
+      const trainingFullyComplete =
+        isAllTierTrainingProblemsComplete(progressMap, tierKey) ||
+        isLatestRecordAtTierCurriculumEnd(progress.latestTrainingRecord, tierKey)
 
       setTrainingPlan({
         ...resumeBase,
@@ -272,10 +282,11 @@ export default function App() {
         trainingProgressMapByProblem,
         completedProblems: progress.completedProblems ?? [],
         failedProblems: progress.failedProblems ?? [],
+        openTrainingCompleteScreen: trainingFullyComplete,
       })
       setJoinedClassSnapshot(null)
       setStudentFlowStep('nickname')
-      setActiveView('diagnostic-intro')
+      setActiveView(trainingFullyComplete ? 'training' : 'diagnostic-intro')
     } catch (error) {
       console.error('학생 기록 조회 실패', error)
       window.alert(
@@ -519,9 +530,11 @@ export default function App() {
         },
       })
 
-      buttonHost.innerHTML = ''
       const wrap = buttonHost.closest('.landing-teacher-google-wrap')
-      wrap?.classList.remove('landing-teacher-google-wrap--gsi-ready')
+      if (!googleGsiReadyRef.current) {
+        wrap?.classList.remove('landing-teacher-google-wrap--gsi-ready')
+      }
+      buttonHost.innerHTML = ''
 
       const renderWidth = Math.min(Math.max(measureGoogleRenderWidth(buttonHost), 200), 400)
       lastGoogleRenderWidthRef.current = renderWidth
@@ -534,17 +547,29 @@ export default function App() {
         locale: 'ko',
       })
 
-      window.setTimeout(() => {
+      const markReadyIfIframe = () => {
         const iframe = buttonHost.querySelector('iframe')
-        if (iframe) {
-          wrap?.classList.add('landing-teacher-google-wrap--gsi-ready')
-          setTeacherAuthError('')
-        } else {
-          setTeacherAuthError(
-            `Google 로그인 버튼을 불러오지 못했습니다. ${googleOriginSetupHint()}`,
-          )
-        }
-      }, 1200)
+        if (!iframe) return false
+        wrap?.classList.add('landing-teacher-google-wrap--gsi-ready')
+        googleGsiReadyRef.current = true
+        setTeacherAuthError('')
+        return true
+      }
+
+      if (!markReadyIfIframe()) {
+        let attempts = 0
+        const pollId = window.setInterval(() => {
+          attempts += 1
+          if (markReadyIfIframe() || attempts >= 40) {
+            window.clearInterval(pollId)
+            if (!googleGsiReadyRef.current) {
+              setTeacherAuthError(
+                `Google 로그인 버튼을 불러오지 못했습니다. ${googleOriginSetupHint()}`,
+              )
+            }
+          }
+        }, 50)
+      }
     }
 
     if (existingScript) {
@@ -566,18 +591,15 @@ export default function App() {
     if (!host) return
 
     const teacherBtnRow = host.closest('.landing-teacher-btn-row')
-    const googleWrap = host.closest('.landing-teacher-google-wrap')
-    const googleFace = googleWrap?.querySelector('.landing-teacher-google-face')
-
     const refreshGoogleButtonLayout = () => {
       const buttonHost = googleBtnRef.current
       if (!buttonHost || !window.google?.accounts?.id) return
       const renderWidth = measureGoogleRenderWidth(buttonHost)
-      if (Math.abs(renderWidth - lastGoogleRenderWidthRef.current) < 12) return
+      if (Math.abs(renderWidth - lastGoogleRenderWidthRef.current) < 40) return
       window.clearTimeout(googleInitDebounceRef.current)
       googleInitDebounceRef.current = window.setTimeout(() => {
         initializeGoogle()
-      }, 250)
+      }, 400)
     }
 
     const resizeObserver =
@@ -587,9 +609,7 @@ export default function App() {
           })
         : null
     resizeObserver?.observe(host)
-    if (googleWrap) resizeObserver?.observe(googleWrap)
     if (teacherBtnRow) resizeObserver?.observe(teacherBtnRow)
-    if (googleFace) resizeObserver?.observe(googleFace)
     const adventureBtn = adventureCtaRef.current
     if (adventureBtn) resizeObserver?.observe(adventureBtn)
     window.addEventListener('resize', refreshGoogleButtonLayout)
@@ -598,6 +618,7 @@ export default function App() {
       window.clearTimeout(googleInitDebounceRef.current)
       resizeObserver?.disconnect()
       window.removeEventListener('resize', refreshGoogleButtonLayout)
+      googleGsiReadyRef.current = false
     }
   }, [activeView, studentFlowStep])
 
