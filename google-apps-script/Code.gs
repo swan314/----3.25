@@ -742,8 +742,33 @@ function formatLastActivity_(v) {
   if (v instanceof Date && !isNaN(v.getTime())) {
     return formatDateKoSeoul12h_(v);
   }
-  return String(v != null ? v : '')
-    .trim();
+  var serialDate = sheetSerialToDate_(v);
+  if (serialDate) {
+    return formatDateKoSeoul12h_(serialDate);
+  }
+  var s = String(v != null ? v : '')
+    .trim()
+    .replace(/^["']|["']$/g, '');
+  if (!s) {
+    return '';
+  }
+  if (/^\d{4}\.\s*\d{1,2}\.\s*\d{1,2}\s*(오전|오후)\s*\d{1,2}:\d{2}:\d{2}$/.test(s)) {
+    return s;
+  }
+  if (/^\d{10,13}$/.test(s)) {
+    var n = Number(s);
+    if (n >= 1e12) {
+      return formatDateKoSeoul12h_(new Date(n));
+    }
+    if (n >= 1e9) {
+      return formatDateKoSeoul12h_(new Date(n * 1000));
+    }
+  }
+  var parsed = Date.parse(s);
+  if (!isNaN(parsed)) {
+    return formatDateKoSeoul12h_(new Date(parsed));
+  }
+  return s;
 }
 
 function formatDateKoSeoul12h_(d) {
@@ -3079,12 +3104,14 @@ function buildRowFromPayload_(data) {
     }
   }
 
-  var diagTime = String(data.diag_time || '');
+  var diagTimeRaw = String(data.diag_time || '').trim();
+  var diagTime = diagTimeRaw ? formatLastActivity_(data.diag_time) : '';
   var problem = String(data.problem || data.item || '');
   var type = String(data.type || '');
-  var timestamp = String(
+  var timestampRaw = String(
     data.timestamp || data.completionDate || data.completedAt || ''
-  );
+  ).trim();
+  var timestamp = timestampRaw ? formatLastActivity_(timestampRaw) : '';
 
   var steps = normalizeSteps_(data);
 

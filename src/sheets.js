@@ -909,7 +909,9 @@ function mapLegacyRosterToStudentRow(entry) {
       ? Number(entry.latestTotal ?? entry.total)
       : 0,
     latestStatus: lastStatus || '—',
-    lastActivity: String(entry?.lastActivity ?? entry?.timestamp ?? '').trim(),
+    lastActivity: formatAdminSeoulSheetTimestamp(
+      String(entry?.lastActivity ?? entry?.timestamp ?? '').trim(),
+    ),
     mainSuccessCount: Number.isFinite(Number(entry?.mainSuccessCount))
       ? Number(entry.mainSuccessCount)
       : 0,
@@ -1064,16 +1066,7 @@ export function sheetStatusLabelForAdmin(record) {
 
 export function formatAdminHistoryTimestamp(record) {
   const v = record.timestamp ?? record.completionDate ?? record.completedAt ?? record.diag_time
-  if (v instanceof Date && !Number.isNaN(v.getTime())) {
-    return v.toLocaleString('ko-KR', { timeZone: 'Asia/Seoul' })
-  }
-  const s = String(v ?? '').trim()
-  if (!s) return '—'
-  const ms = Date.parse(s)
-  if (Number.isFinite(ms)) {
-    return new Date(ms).toLocaleString('ko-KR', { timeZone: 'Asia/Seoul' })
-  }
-  return s
+  return formatAdminHistoryTimestampCellValue(v)
 }
 
 /** 구글 시트·class_roster 표기: `2026. 5. 17 오후 10:06:08` */
@@ -1100,7 +1093,9 @@ export function coerceAdminTimestampToMs(value) {
     }
     return NaN
   }
-  const s = String(value).trim()
+  const s = String(value)
+    .trim()
+    .replace(/^["']|["']$/g, '')
   if (!s) return NaN
   if (/^\d{10,13}$/.test(s)) {
     const n = Number(s)
@@ -1141,7 +1136,13 @@ export function formatAdminSeoulSheetTimestamp(value) {
   if (Number.isFinite(ms)) {
     return formatAdminSeoulSheetTimestampFromDate_(new Date(ms))
   }
-  return s || '—'
+  if (/^\d{4}-\d{2}-\d{2}T/.test(s)) {
+    const parsed = Date.parse(s)
+    if (Number.isFinite(parsed)) {
+      return formatAdminSeoulSheetTimestampFromDate_(new Date(parsed))
+    }
+  }
+  return s && !/^\d{4}-\d{2}-\d{2}T/.test(s) ? s : '—'
 }
 
 function pickRecordField(record, key) {
@@ -1155,9 +1156,9 @@ function pickRecordField(record, key) {
 function formatAdminHistoryTimestampCellValue(value) {
   if (value === undefined || value === null || String(value).trim() === '') return '—'
   const formatted = formatAdminSeoulSheetTimestamp(value)
-  if (formatted !== '—' && String(formatted).trim() !== '') return formatted
-  const s = String(value).trim()
-  return s || '—'
+  const out = formatted !== '—' && String(formatted).trim() !== '' ? formatted : '—'
+  if (/^\d{4}-\d{2}-\d{2}T/.test(String(out).trim())) return '—'
+  return out
 }
 
 /**

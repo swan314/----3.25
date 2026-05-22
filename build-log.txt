@@ -1,0 +1,7 @@
+
+> -3-25@0.0.0 build
+> node scripts/sync-netlify-redirects.mjs && vite build
+
+[netlify] public/_redirects → https://script.google.com/macros/s/AKfycbysaYXHZlQ7RNvORjrCPGY-7tjmxxUkxSOm8tVQ_pM7WSqaLP0Tc99F8kj-i6F2FRiQ/exec
+[36mvite v8.0.2 [32mbuilding client environment for production...[36m[39m
+[2Ktransforming...✓ 263 modules transformed.

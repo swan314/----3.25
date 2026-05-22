@@ -1,3 +1,5 @@
+import { formatAdminSeoulSheetTimestamp } from '../sheets'
+
 /** 학생 데이터 테이블·학생 상세 요약 공통 열 정의 */
 export const ADMIN_STUDENT_SUMMARY_COLUMNS = [
   { key: 'nickname', label: '닉네임' },
@@ -45,6 +47,6 @@ export function formatAdminStudentSummaryCells(source, { pending = false } = {})
     mathCardCount: formatCount(s.mathCardCount, pending),
     lastActivity: pending
       ? '—'
-      : String(s.lastActivityDisplay ?? s.lastActivity ?? '—') || '—',
+      : formatAdminSeoulSheetTimestamp(s.lastActivityDisplay ?? s.lastActivity ?? ''),
   }
 }
