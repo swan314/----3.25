@@ -280,9 +280,12 @@ export function shouldAwardMathCard(type, failCount) {
 }
 
 
-function mathCardVaultSlotClassName({ opened, isNew }) {
+function mathCardVaultSlotClassName({ opened, isNew, compact = false }) {
   return [
-    'math-card-vault-slot flex h-[213px] w-[150px] shrink-0 overflow-hidden rounded-xl border-2',
+    'math-card-vault-slot flex overflow-hidden rounded-xl border-2',
+    compact
+      ? 'aspect-[150/213] h-auto w-full min-w-0 max-h-[11.25rem]'
+      : 'h-[213px] w-[150px] shrink-0',
     opened
       ? 'math-card-vault-slot--unlocked math-card-vault-slot--interactive border-indigo-900 bg-indigo-900 p-1.5'
       : 'math-card-vault-slot--locked border-indigo-900/35 bg-slate-100/90 opacity-55',
@@ -293,7 +296,7 @@ function mathCardVaultSlotClassName({ opened, isNew }) {
 }
 
 /** 카드 보관함 슬롯 UI — 열림은 progressMap 기준 completed, 이미지는 math_cards 매칭 */
-function MathCardSlotGrid({ slots, unlockedSet, recentlyAcquiredCode = null }) {
+function MathCardSlotGrid({ slots, unlockedSet, recentlyAcquiredCode = null, compact = false }) {
   const openLookup =
     unlockedSet instanceof Set
       ? unlockedSet
@@ -305,7 +308,13 @@ function MathCardSlotGrid({ slots, unlockedSet, recentlyAcquiredCode = null }) {
   const acquiredNorm = normalizeMathCardStorageCode(recentlyAcquiredCode)
 
   return (
-    <div className="grid grid-cols-5 gap-x-3 gap-y-2">
+    <div
+      className={
+        compact
+          ? 'grid w-full grid-cols-5 gap-x-1.5 gap-y-1.5 sm:gap-x-2 sm:gap-y-2'
+          : 'grid grid-cols-5 gap-x-3 gap-y-2'
+      }
+    >
       {(slots || []).map((card, idx) => {
         const code = normalizeMathCardStorageCode(card?.code ?? card?.problem)
         const opened = Boolean(code && openLookup.has(code))
@@ -320,7 +329,7 @@ function MathCardSlotGrid({ slots, unlockedSet, recentlyAcquiredCode = null }) {
             return (
               <div
                 key={`card-slot-${code}-${idx}`}
-                className={mathCardVaultSlotClassName({ opened: true, isNew })}
+                className={mathCardVaultSlotClassName({ opened: true, isNew, compact })}
                 title={cardTitle}
               >
                 <div className="mx-auto flex h-full w-full items-center justify-center overflow-hidden rounded-lg border-2 border-indigo-800 bg-white">
@@ -337,7 +346,7 @@ function MathCardSlotGrid({ slots, unlockedSet, recentlyAcquiredCode = null }) {
             <div
               key={`card-slot-open-nopic-${code}-${idx}`}
               className={[
-                mathCardVaultSlotClassName({ opened: true, isNew }),
+                mathCardVaultSlotClassName({ opened: true, isNew, compact }),
                 'flex-col items-center justify-center gap-1 bg-indigo-50 px-2 text-center',
               ].join(' ')}
               title={cardTitle}
@@ -357,7 +366,7 @@ function MathCardSlotGrid({ slots, unlockedSet, recentlyAcquiredCode = null }) {
           <div
             key={`card-slot-locked-${idx}`}
             className={[
-              mathCardVaultSlotClassName({ opened: false, isNew: false }),
+              mathCardVaultSlotClassName({ opened: false, isNew: false, compact }),
               'items-center justify-center',
             ].join(' ')}
           >
@@ -2152,22 +2161,19 @@ export default function TrainingMode({
           {completionEncouragement}
         </p>
 
-        <div className="mx-auto mt-10 w-full max-w-[810px] rounded-2xl border border-slate-200 bg-white/90 px-4 py-5 shadow-md sm:px-6">
+        <div className="mx-auto mt-10 w-full max-w-4xl rounded-2xl border border-slate-200 bg-white/90 px-3 py-5 shadow-md sm:px-5">
           <div className="mb-4 flex flex-col items-center justify-between gap-2 sm:flex-row sm:items-center">
             <p className="text-center text-base font-black text-slate-800 sm:text-left">🎴 획득 카드</p>
             <p className="text-sm font-semibold text-slate-600 sm:text-base">
               획득 {acquiredMathCardCount} / 15
             </p>
           </div>
-          <div className="-mx-1 w-full overflow-x-auto pb-1 sm:mx-0">
-            <div className="inline-block min-w-0 px-1 sm:block sm:px-0">
-              <MathCardSlotGrid
-                slots={mathCardCollectionSlots}
-                unlockedSet={mathCardVaultCompletedByProgressSet}
-                recentlyAcquiredCode={recentlyAcquiredCardCode}
-              />
-            </div>
-          </div>
+          <MathCardSlotGrid
+            compact
+            slots={mathCardCollectionSlots}
+            unlockedSet={mathCardVaultCompletedByProgressSet}
+            recentlyAcquiredCode={recentlyAcquiredCardCode}
+          />
         </div>
 
         <div className="mt-10 flex justify-center">
