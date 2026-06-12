@@ -3,6 +3,7 @@ import { useEffect, useRef, useState } from 'react'
 export default function ScratchPadModal({ open, onClose }) {
   const canvasRef = useRef(null)
   const wrapRef = useRef(null)
+  const panelRef = useRef(null)
   const isDrawingRef = useRef(false)
   const [tool, setTool] = useState('pen')
   const [position, setPosition] = useState({ x: 16, y: 16 })
@@ -52,6 +53,19 @@ export default function ScratchPadModal({ open, onClose }) {
     }
   }
 
+  const clampPanelPosition = (x, y) => {
+    const margin = 8
+    const panel = panelRef.current
+    const w = panel?.offsetWidth ?? 400
+    const h = panel?.offsetHeight ?? 400
+    const maxX = Math.max(margin, window.innerWidth - w - margin)
+    const maxY = Math.max(margin, window.innerHeight - h - margin)
+    return {
+      x: Math.min(maxX, Math.max(margin, x)),
+      y: Math.min(maxY, Math.max(margin, y)),
+    }
+  }
+
   const handleDragMove = (event) => {
     const state = dragRef.current
     if (!state.dragging) return
@@ -59,9 +73,8 @@ export default function ScratchPadModal({ open, onClose }) {
 
     const dx = event.clientX - state.startX
     const dy = event.clientY - state.startY
-    const nextX = Math.max(8, state.originX - dx)
-    const nextY = Math.max(8, state.originY - dy)
-    setPosition({ x: nextX, y: nextY })
+    const next = clampPanelPosition(state.originX - dx, state.originY - dy)
+    setPosition(next)
   }
 
   const handleDragEnd = (event) => {
@@ -127,8 +140,12 @@ export default function ScratchPadModal({ open, onClose }) {
     ctx.fillRect(0, 0, rect.width, rect.height)
   }
 
+  const closeButtonClass =
+    'rounded-lg bg-slate-900 px-3 py-1.5 text-sm font-bold text-white'
+
   return (
     <div
+      ref={panelRef}
       className="fixed z-[9999] w-[min(50vw,760px)] min-w-[360px] max-w-[96vw] rounded-2xl border border-slate-200 bg-white p-4 shadow-2xl"
       style={{ right: `${position.x}px`, bottom: `${position.y}px` }}
       onPointerMove={handleDragMove}
@@ -169,11 +186,7 @@ export default function ScratchPadModal({ open, onClose }) {
             >
               전체 지우기
             </button>
-            <button
-              type="button"
-              onClick={onClose}
-              className="rounded-lg bg-slate-900 px-3 py-1.5 text-sm font-bold text-white"
-            >
+            <button type="button" onClick={onClose} className={closeButtonClass}>
               닫기
             </button>
           </div>
@@ -189,6 +202,12 @@ export default function ScratchPadModal({ open, onClose }) {
             onPointerLeave={handlePointerUp}
             onPointerCancel={handlePointerUp}
           />
+        </div>
+
+        <div className="mt-3 flex justify-center">
+          <button type="button" onClick={onClose} className={closeButtonClass}>
+            닫기
+          </button>
         </div>
     </div>
   )

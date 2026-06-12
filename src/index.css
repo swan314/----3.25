@@ -48,6 +48,29 @@ body {
   animation: math-card-acquire-enter 0.85s ease-out both;
 }
 
+/* 카드 보관함 — 15장(5×3)을 75%로 축소해 스크롤 없이 한 화면에 표시 */
+.math-card-vault-scaled75-wrap {
+  --vault-card-w: 150px;
+  --vault-card-h: 213px;
+  --vault-gap-x: 12px;
+  --vault-gap-y: 8px;
+  --vault-full-w: calc(var(--vault-card-w) * 5 + var(--vault-gap-x) * 4);
+  --vault-full-h: calc(var(--vault-card-h) * 3 + var(--vault-gap-y) * 2);
+  --vault-scale: min(0.75, calc((100vw - 3rem) / var(--vault-full-w)));
+  width: calc(var(--vault-full-w) * var(--vault-scale));
+  height: calc(var(--vault-full-h) * var(--vault-scale));
+  max-width: 100%;
+  margin-inline: auto;
+  overflow: hidden;
+  flex-shrink: 0;
+}
+
+.math-card-vault-scaled75-inner {
+  transform: scale(var(--vault-scale));
+  transform-origin: top left;
+  width: var(--vault-full-w);
+}
+
 .math-card-vault-slot {
   transition:
     transform 0.22s ease,
@@ -119,6 +142,44 @@ body {
   min-height: 38px !important;
   max-height: 42px;
   font-size: 0.9375rem;
+  scroll-margin: 0;
+}
+
+.training-result-page-scroll {
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+}
+
+/* 수련 풀이 — 문제 상단 고정, 단계 기록만 스크롤 (태블릿·모바일) */
+.training-problem-session {
+  min-height: 0;
+}
+
+.training-problem-panel {
+  min-height: 0;
+}
+
+.training-problem-sticky {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+}
+
+.training-problem-steps {
+  min-height: 0;
+}
+
+.training-step-history-scroll {
+  overscroll-behavior: contain;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+  scrollbar-gutter: stable;
+}
+
+.training-step-input-panel {
+  overscroll-behavior: contain;
 }
 
 @keyframes training-intro-cta-glow {

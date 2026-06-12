@@ -13,6 +13,7 @@ import {
 } from './levelConfig.js'
 import { clearAllStudentLocalSession, readStoredLearner } from './studentPersist.js'
 import { downloadElementAsPdf } from './utils/downloadPdf.js'
+import { isMathExpressionEquivalent } from './training/scaffoldUtils.js'
 
 const app = document.querySelector('#app')
 const API_URL = (import.meta.env.VITE_API_URL || '').toString().trim()
@@ -984,95 +985,15 @@ function renderLevelCheckPlaceholder(problemIdx = 0) {
     }
 
     if (stage.type === 'equation') {
-      const n = raw
-        .toString()
-        .trim()
-        .replace(/\s+/g, '')
-        .replace(/[−–]/g, '-')
-        .toLowerCase()
-
-      const compact = n.replace(/\*/g, '')
-
-      if (problem.id === 'p2') {
-        const hasEq = compact.includes('=')
-        const has40 = compact.includes('40')
-        const has8 = compact.includes('8')
-        const hasX = compact.includes('x')
-        const has3 = compact.includes('3(') || compact.includes('*3') || compact.includes('x3') || compact.includes('3*')
-        const ok = hasEq && has40 && has8 && hasX && has3
-        return { score: ok ? stage.points : 0, ok }
-      } else if (problem.id === 'p3') {
-        const ok = compact.includes('10x+6') && (compact.includes('4(6+x)') || compact.includes('4(x+6)'))
-        return { score: ok ? stage.points : 0, ok }
-      } else if (problem.id === 'p4') {
-        // 정답지: x/10 + x/15 = 2
-        // 분수 입력(LaTeX \frac) → (x)/(10) 형태이므로 x/n · (1/n)x 와 동치로 정규화
-        let c = compact
-        c = c.replace(/\((x)\)\/\((\d+)\)/g, 'x/$2')
-        c = c.replace(/\((\d+)\)\/\((\d+)\)/g, '($1/$2)')
-        const hasEq2 = c.includes('=2')
-        const hasTerm = (den) => {
-          const d = String(den)
-          return (
-            c.includes(`x/${d}`) ||
-            c.includes(`x÷${d}`) ||
-            c.includes(`(1/${d})x`) ||
-            c.includes(`1/${d}x`) ||
-            c.includes(`x*(1/${d})`) ||
-            c.includes(`(1/${d})*x`)
-          )
-        }
-        const ok = hasEq2 && hasTerm(10) && hasTerm(15)
-        return { score: ok ? stage.points : 0, ok }
-      } else if (problem.id === 'p5') {
-        let c = compact
-        c = c.replace(/[·⋅∙]/g, '')
-        c = c.replace(/\((x)\)\/\((\d+)\)/g, 'x/$2')
-        c = c.replace(/\((\d+)\)\/\((\d+)\)/g, '($1/$2)')
-        const hasTerm = (den) => {
-          const d = String(den)
-          return (
-            c.includes(`x/${d}`) ||
-            c.includes(`x÷${d}`) ||
-            c.includes(`(1/${d})x`) ||
-            c.includes(`1/${d}x`) ||
-            c.includes(`1/${d}(x)`) ||
-            c.includes(`x*(1/${d})`) ||
-            c.includes(`(1/${d})*x`)
-          )
-        }
-        const ok = hasTerm(4) && hasTerm(3) && hasTerm(6) && c.includes('=1')
-        return { score: ok ? stage.points : 0, ok }
-      } else {
-        // PDF 기준: 3x + 2(x + 3000) = 31000
-        const hasEq = compact.includes('=')
-        const hasTotal = compact.includes('31000')
-        const has3x = compact.includes('3x')
-        const has3000 = compact.includes('3000')
-        const has6000 = compact.includes('6000')
-        const has5x = compact.includes('5x')
-
-        const hasXplus = compact.includes('x+3000')
-        const hasFactored =
-          compact.includes('2(x+3000)') ||
-          compact.includes('2*(x+3000)') ||
-          /2\(?x\+3000\)?/.test(compact) // 2(x+3000) 계열
-
-        // 전개형 일부 허용: 2x+6000, 5x+6000 등
-        const hasExpanded =
-          compact.includes('2x+6000') ||
-          compact.includes('5x+6000') ||
-          compact.includes('3x+2x+6000') ||
-          (compact.includes('2x') && has3x && has6000)
-
-        // factorized: 3x + 2(x+3000) = 31000
-        // expanded: 5x + 6000 = 31000 (등)
-        const ok =
-          hasEq &&
-          hasTotal &&
-          ((hasXplus && hasFactored && has3x) || (hasExpanded && (has5x || has3x)))
-        return { score: ok ? stage.points : 0, ok }
-      }
+      const expectedRaw = String(stage.hint || stage.expectedDisplay || '').trim()
+      const alternatives = expectedRaw
+        .split(/\s*\/\s*|\n+/)
+        .map((s) => s.trim())
+        .filter(Boolean)
+      const ok =
+        alternatives.length > 0 &&
+        alternatives.some((expected) => isMathExpressionEquivalent(raw, expected))
+      return { score: ok ? stage.points : 0, ok }
     }
 
     return { score: 0, ok: false }
@@ -1301,6 +1222,9 @@ function renderLevelCheckPlaceholder(problemIdx = 0) {
       <div id="mm-sp-canvas-wrap" style="height:54vh;min-height:300px;border:1px solid #cbd5e1;border-radius:12px;overflow:hidden;background:#fff;">
         <canvas id="mm-sp-canvas" style="width:100%;height:100%;touch-action:none;"></canvas>
       </div>
+      <div style="display:flex;justify-content:center;margin-top:12px;">
+        <button type="button" id="mm-sp-close-bottom" style="border:none;background:#0f172a;color:#fff;border-radius:8px;padding:8px 14px;font-weight:700;">닫기</button>
+      </div>
     `
     document.body.appendChild(panel)
 
@@ -1311,6 +1235,7 @@ function renderLevelCheckPlaceholder(problemIdx = 0) {
     const eraserBtn = panel.querySelector('#mm-sp-eraser')
     const clearBtn = panel.querySelector('#mm-sp-clear')
     const closeBtn = panel.querySelector('#mm-sp-close')
+    const closeBtnBottom = panel.querySelector('#mm-sp-close-bottom')
     if (!canvas || !wrap || !dragBar || !penBtn || !eraserBtn || !clearBtn || !closeBtn) return
 
     const dpr = window.devicePixelRatio || 1
@@ -1384,9 +1309,23 @@ function renderLevelCheckPlaceholder(problemIdx = 0) {
       ctx.fillStyle = '#ffffff'
       ctx.fillRect(0, 0, r.width, r.height)
     })
-    closeBtn.addEventListener('click', () => {
+    const hidePanel = () => {
       panel.style.display = 'none'
-    })
+    }
+    closeBtn.addEventListener('click', hidePanel)
+    closeBtnBottom?.addEventListener('click', hidePanel)
+
+    const clampScratchPanel = (right, bottom) => {
+      const margin = 8
+      const w = panel.offsetWidth || 400
+      const h = panel.offsetHeight || 400
+      const maxRight = Math.max(margin, window.innerWidth - w - margin)
+      const maxBottom = Math.max(margin, window.innerHeight - h - margin)
+      return {
+        right: Math.min(maxRight, Math.max(margin, right)),
+        bottom: Math.min(maxBottom, Math.max(margin, bottom)),
+      }
+    }
 
     const dragState = {
       dragging: false,
@@ -1414,10 +1353,9 @@ function renderLevelCheckPlaceholder(problemIdx = 0) {
       if (dragState.pointerId != null && event.pointerId !== dragState.pointerId) return
       const dx = event.clientX - dragState.startX
       const dy = event.clientY - dragState.startY
-      const nextRight = Math.max(8, dragState.originRight - dx)
-      const nextBottom = Math.max(8, dragState.originBottom - dy)
-      panel.style.right = `${nextRight}px`
-      panel.style.bottom = `${nextBottom}px`
+      const clamped = clampScratchPanel(dragState.originRight - dx, dragState.originBottom - dy)
+      panel.style.right = `${clamped.right}px`
+      panel.style.bottom = `${clamped.bottom}px`
     })
 
     ;['pointerup', 'pointercancel', 'pointerleave'].forEach((name) => {
@@ -2122,9 +2060,11 @@ function renderLevelCheckPlaceholder(problemIdx = 0) {
                 return `
                   <div class="mm-step-result">
                     <div class="mm-score-row">
-                      <div class="mm-score-step">${idx + 1}단계: ${escapeHtml(stages[idx].title)}</div>
+                      <div class="mm-score-row-head">
+                        <div class="mm-score-step">${idx + 1}단계: ${escapeHtml(stages[idx].title)}</div>
+                        <div class="mm-score-status ${isOk ? 'ok' : 'no'}">${isOk ? '통과' : '재확인'}</div>
+                      </div>
                       <div class="mm-score-points">${scores[idx]}/${s.points}점</div>
-                      <div class="mm-score-status ${isOk ? 'ok' : 'no'}">${isOk ? '통과' : '재확인'}</div>
                     </div>
 
                     <div class="mm-compare-block" aria-label="학생 답과 정답지">

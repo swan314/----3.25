@@ -220,11 +220,19 @@ export function blanksAllCorrect(sourceText, keyedValues, stageIndex) {
   return true
 }
 
-export function normalizeLooseAnswer(s) {
+export function normalizeLooseAnswer(s, options = {}) {
+  const { preserveFractions = false } = options
   const normalized = (s ?? '')
     .toString()
     .trim()
     .replace(/\\left|\\right/g, '')
+    .replace(/\\text\s*\{([^}]*)\}/g, (_, inner) => String(inner ?? ''))
+    .replace(/\\mathrm\s*\{([^}]*)\}/g, (_, inner) => String(inner ?? ''))
+    .replace(/\\operatorname\s*\{([^}]*)\}/g, (_, inner) => String(inner ?? ''))
+    .replace(/\\,/g, '')
+    .replace(/operatorname/gi, '')
+    .replace(/mathrm/gi, '')
+    .replace(/(\d)\s*,\s*([a-z])/gi, '$1$2')
     .replace(/\\times|\\cdot/g, '*')
     .replace(/\\frac\s*\{([^{}]+)\}\s*\{([^{}]+)\}/g, '($1)/($2)')
     .replace(/[\s\u00a0\u2000-\u200b\u202f\u205f\u3000]+/g, '')
@@ -232,6 +240,8 @@ export function normalizeLooseAnswer(s) {
     .replace(/,/g, '')
     .toLowerCase()
     .replace(/\(([-+a-z0-9.]+)\)\/\(([-+a-z0-9.]+)\)/gi, '$1/$2')
+
+  if (preserveFractions) return normalized
 
   const toStableNumberString = (value) => {
     if (!Number.isFinite(value)) return ''
@@ -807,9 +817,154 @@ function insertCoefficientBeforeParenthesisMultiplication(s) {
 }
 
 function normalizeEquationSide(t) {
-  let s = normalizeLooseAnswer(t).replace(/[{}[\]]/g, '').replace(/×/g, '*')
+  let s = normalizeLooseAnswer(t, { preserveFractions: true })
+    .replace(/[{}[\]]/g, '')
+    .replace(/×/g, '*')
   s = insertCoefficientBeforeParenthesisMultiplication(s)
   s = s.replace(/(\d)([a-z])/gi, '$1*$2')
+  // (1/3+1/4-1/6)x, ( … ) km 등 괄호 뒤 문자·괄호 암시 곱
+  s = s.replace(/\)([a-z(])/gi, ')*$1')
+  return s
+}
+
+/** 2*2*x → 4*x, 2*3000 → 6000 등 숫자 곱 단순화 */
+function simplifyNumericProducts(raw) {
+  let s = String(raw ?? '')
+  let prev = ''
+  let guard = 0
+  while (s !== prev && guard < 32) {
+    prev = s
+    guard += 1
+    s = s.replace(/(\d+\.?\d*)\*(\d+\.?\d*)(?=\*[a-z])/gi, (_, a, b) =>
+      String(Number(a) * Number(b)),
+    )
+    s = s.replace(
+      /(^|[+\-])(\d+\.?\d*)\*(\d+\.?\d*)(?=[+\-)]|$)/g,
+      (_, prefix, a, b) => `${prefix}${Number(a) * Number(b)}`,
+    )
+  }
+  return s
+}
+
+/** (a+b+…)*x → a*x+b*x+… (분배법칙 인수분해의 역) */
+function expandFactorTimesVariable(raw) {
+  let s = String(raw ?? '')
+  let prev = ''
+  let guard = 0
+  while (s !== prev && guard < 16) {
+    prev = s
+    guard += 1
+    s = s.replace(/\(([^()]*[+-][^()]*)\)\*([a-z]+)/gi, (_, inner, variable) => {
+      const terms = splitTopLevelSignedTerms(inner)
+      if (terms.length < 2) return _
+      return terms
+        .map((term) => {
+          if (!term) return ''
+          if (term.startsWith('-')) return `-${term.slice(1)}*${variable}`
+          return `${term}*${variable}`
+        })
+        .filter(Boolean)
+        .join('+')
+    })
+  }
+  return s
+}
+
+function parseLinearXCoefficient(body) {
+  const b = stripOuterParens(String(body ?? '').trim())
+  if (b === 'x') return 1
+  const direct = b.match(/^(\d+\.?\d*)\*x$/) || b.match(/^(\d+\.?\d*)x$/)
+  if (direct) return Number(direct[1])
+  const frac = b.match(/^\(?(\d+)\/(\d+)\)?\*x$/) || b.match(/^(\d+)\/(\d+)\*x$/)
+  if (frac) return Number(frac[1]) / Number(frac[2])
+  return null
+}
+
+/** 한 변수 x 1차식 — 동류항 합산 (2*x+4*x-8 → 6*x-8) */
+function combineLikeLinearTerms(raw) {
+  const s = simplifyNumericProducts(expandDistributedProducts(normalizeEquationSide(raw)))
+  if (!s || !/[x]/.test(s)) return s
+  if (/[a-wyz]/i.test(s.replace(/x/gi, ''))) return s
+  const terms = splitTopLevelSignedTerms(s)
+  let xCoeff = 0
+  let constant = 0
+  let bail = false
+  for (const term of terms) {
+    const t = String(term ?? '').trim()
+    if (!t) continue
+    const neg = t.startsWith('-')
+    const body = (neg ? t.slice(1) : t).trim()
+    const sign = neg ? -1 : 1
+    const xCoeffPart = parseLinearXCoefficient(body)
+    if (xCoeffPart != null) {
+      xCoeff += sign * xCoeffPart
+      continue
+    }
+    if (/^\d+\.?\d*$/.test(body)) {
+      constant += sign * Number(body)
+      continue
+    }
+    bail = true
+    break
+  }
+  if (bail) return s
+  const parts = []
+  if (xCoeff !== 0) {
+    if (xCoeff === 1) parts.push('x')
+    else if (xCoeff === -1) parts.push('-x')
+    else parts.push(`${xCoeff}*x`)
+  }
+  if (constant !== 0) parts.push(String(constant))
+  if (!parts.length) return '0'
+  return parts.join('+').replace(/\+\-/g, '-')
+}
+
+/** num*(a+b+…) → num*a+num*b+… */
+function expandDistributedProducts(raw) {
+  let s = expandFactorTimesVariable(String(raw ?? ''))
+  if (!s.includes('*(')) return s
+  let prev = ''
+  let guard = 0
+  while (s !== prev && guard < 32) {
+    prev = s
+    guard += 1
+    s = s.replace(
+      /([+\-]?(?:\d+\.?\d*|\d*\.\d+|[a-z]+|\([^()]*\)))\*\(([^()]+)\)/g,
+      (match, factor, inner) => {
+        if (!/[+-]/.test(inner)) return match
+        const fRaw = String(factor)
+        let fSign = 1
+        let absFactor = fRaw
+        if (absFactor.startsWith('-')) {
+          fSign = -1
+          absFactor = absFactor.slice(1)
+        } else if (absFactor.startsWith('+')) {
+          absFactor = absFactor.slice(1)
+        }
+        const terms = splitTopLevelSignedTerms(inner)
+        if (terms.length < 2) return match
+        const expanded = terms
+          .map((term) => {
+            let tSign = 1
+            let body = term
+            if (body.startsWith('-')) {
+              tSign = -1
+              body = body.slice(1)
+            }
+            const combinedSign = fSign * tSign
+            if (/^\d+\.?\d*$/.test(body) && /^\d+\.?\d*$/.test(absFactor)) {
+              const n = combinedSign * Number(absFactor) * Number(body)
+              return n < 0 ? String(n) : String(n)
+            }
+            const prefix = combinedSign < 0 ? '-' : ''
+            return `${prefix}${absFactor}*${body}`
+          })
+          .join('+')
+        if (fRaw.startsWith('+')) return `+${expanded}`
+        return expanded
+      },
+    )
+  }
   return s
 }
 
@@ -932,7 +1087,7 @@ function splitTopLevelBinaryOp(raw, opChar) {
  * (480+x)/36 ↔ (x+480)/36, 2*x*480 ↔ 480*2*x 등
  */
 function canonicalizeMathExpression(raw) {
-  let s = normalizeEquationSide(raw)
+  let s = expandDistributedProducts(normalizeEquationSide(raw))
   if (!s) return ''
 
   if (hasTopLevelAddSub(s)) {
@@ -1098,6 +1253,16 @@ function looksLikeMathExpression(raw) {
  * - 방정식은 좌우 교환·양변 부호 반전·이항 동치
  * - 포함 비교는 사용하지 않음
  */
+function normalizeEquationSideForCompare(raw) {
+  const expanded = simplifyNumericProducts(
+    expandDistributedProducts(normalizeEquationSide(raw)),
+  )
+  const combined = combineLikeLinearTerms(raw)
+  const candidate = combined || expanded
+  const canonical = canonicalizeMathExpression(candidate)
+  return canonical || candidate
+}
+
 export function isMathExpressionEquivalent(studentRaw, expectedRaw) {
   const s = normalizeEquationSide(studentRaw)
   const e = normalizeEquationSide(expectedRaw)
@@ -1109,7 +1274,10 @@ export function isMathExpressionEquivalent(studentRaw, expectedRaw) {
   if (sHasEq !== eHasEq) return false
 
   if (!sHasEq) {
-    return canonicalizeMathExpression(s) === canonicalizeMathExpression(e)
+    const sNorm = normalizeEquationSideForCompare(studentRaw)
+    const eNorm = normalizeEquationSideForCompare(expectedRaw)
+    if (sNorm === eNorm) return true
+    return canonicalizeMathExpression(sNorm) === canonicalizeMathExpression(eNorm)
   }
 
   const [sLeft, sRight, ...sRest] = s.split('=')
@@ -1117,10 +1285,15 @@ export function isMathExpressionEquivalent(studentRaw, expectedRaw) {
   if (sRest.length || eRest.length) return false
   if (sLeft == null || sRight == null || eLeft == null || eRight == null) return false
 
-  if (equationsEquivalentByMovedTerms(sLeft, sRight, eLeft, eRight)) return true
+  const sLeftN = normalizeEquationSideForCompare(sLeft)
+  const sRightN = normalizeEquationSideForCompare(sRight)
+  const eLeftN = normalizeEquationSideForCompare(eLeft)
+  const eRightN = normalizeEquationSideForCompare(eRight)
 
-  const studentSig = equationEquivalenceSignature(sLeft, sRight)
-  const expectedSig = equationEquivalenceSignature(eLeft, eRight)
+  if (equationsEquivalentByMovedTerms(sLeftN, sRightN, eLeftN, eRightN)) return true
+
+  const studentSig = equationEquivalenceSignature(sLeftN, sRightN)
+  const expectedSig = equationEquivalenceSignature(eLeftN, eRightN)
   return Boolean(studentSig) && studentSig === expectedSig
 }
 

@@ -67,11 +67,17 @@ export function latexToPlain(latex) {
     String(latex || '')
       .replace(/\\left|\\right/g, '')
       .replace(/\\text\s*\{([^}]*)\}/g, (_, inner) => String(inner ?? ''))
+      .replace(/\\mathrm\s*\{([^}]*)\}/g, (_, inner) => String(inner ?? ''))
+      .replace(/\\operatorname\s*\{([^}]*)\}/g, (_, inner) => String(inner ?? ''))
+      .replace(/\\,/g, '')
       .replace(/\\times|\\cdot/g, '*')
       .replace(/\\frac\s*\{([^{}]+)\}\s*\{([^{}]+)\}/g, '($1)/($2)')
       .replace(/\\frac\s*([0-9a-zA-Z]+)\s*([0-9a-zA-Z]+)/g, '($1)/($2)')
       .replace(/\\/g, '')
       .replace(/[{}]/g, '')
+      .replace(/(\d)\s*,\s*([a-z])/gi, '$1$2')
+      .replace(/operatorname/gi, '')
+      .replace(/mathrm/gi, '')
       .trim(),
   )
 }

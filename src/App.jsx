@@ -1103,8 +1103,14 @@ export default function App() {
     })
   }, [adminStudentDetail, adminHistoryRecords, adminHistoryCompletedProblems])
 
+  const isTrainingView = activeView === 'training'
+
   return (
-    <div className="relative flex min-h-screen flex-col overflow-hidden bg-gradient-to-br from-yellow-100 via-blue-100 to-yellow-50 text-slate-900">
+    <div
+      className={`relative flex flex-col overflow-hidden bg-gradient-to-br from-yellow-100 via-blue-100 to-yellow-50 text-slate-900 ${
+        isTrainingView ? 'h-dvh max-h-dvh min-h-0' : 'min-h-screen'
+      }`}
+    >
       <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(circle_at_20%_20%,rgba(37,99,235,0.12),transparent_45%),radial-gradient(circle_at_80%_0%,rgba(250,204,21,0.2),transparent_45%),radial-gradient(circle_at_40%_80%,rgba(37,99,235,0.1),transparent_42%)]" />
       <div className="pointer-events-none absolute inset-0 opacity-25 [background-image:radial-gradient(circle_at_center,rgba(59,130,246,0.22)_1.5px,transparent_1.5px),radial-gradient(circle_at_center,rgba(234,179,8,0.2)_1.5px,transparent_1.5px)] [background-position:0_0,28px_28px] [background-size:56px_56px]" />
 
@@ -1114,7 +1120,9 @@ export default function App() {
             ? 'max-w-[92rem] flex min-h-[calc(100dvh-2rem)] flex-1 justify-center py-6 sm:py-8 lg:py-10'
             : activeView === 'diagnostic-intro'
               ? 'max-w-6xl flex min-h-[calc(100dvh-2rem)] flex-1 justify-center py-10 sm:py-12'
-              : 'max-w-6xl py-8 lg:py-12'
+              : activeView === 'training'
+                ? 'max-w-6xl flex min-h-0 flex-1 flex-col overflow-y-auto py-4 sm:py-6 lg:py-8'
+                : 'max-w-6xl py-8 lg:py-12'
         }`}
       >
         {activeView === 'training' && (
