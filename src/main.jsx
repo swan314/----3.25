@@ -2,10 +2,15 @@ import { StrictMode } from 'react'
 import { createRoot } from 'react-dom/client'
 import App from './App'
 import { loadStepTrainingDataByKey } from './training/stepTrainingData'
+import { loadScaffoldingTestData } from './training/scaffoldingTestData'
 import './index.css'
 
 loadStepTrainingDataByKey().catch((err) => {
   console.warn('[step-training] load failed:', err)
+})
+
+loadScaffoldingTestData().catch((err) => {
+  console.warn('[scaffolding-test] load failed:', err)
 })
 
 const appEl = document.getElementById('app')

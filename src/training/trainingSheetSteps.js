@@ -1,4 +1,6 @@
 import {
+  getSheetKeyForProgressIndex,
+  TRAINING_SHEET_SLOT_COUNT,
   TRAINING_SHEET_STEP_KEYS,
   TRAINING_STAGE_COUNT,
 } from './trainingStageConfig'
@@ -13,14 +15,15 @@ function resultMapFromCompleted(completedSteps) {
   return map
 }
 
-function cellValueForStage(resultByIndex, stageIndex, activeSet) {
-  if (!activeSet.has(stageIndex)) return ''
-  if (resultByIndex[stageIndex] === undefined) return ''
-  return resultByIndex[stageIndex]
+function cellValueForProgressIndex(resultByIndex, progressIndex, activeSet) {
+  if (!activeSet.has(progressIndex)) return ''
+  if (resultByIndex[progressIndex] === undefined) return ''
+  return resultByIndex[progressIndex]
 }
 
 /**
- * 단계별 고정 슬롯(step5_1·5_2·5_3 분리) + activeSteps 기준 total/fail_count.
+ * 본 진행 6단계 → Sheet 8슬롯 매핑.
+ * step5_2·step5_3는 신규 기록에서 항상 빈칸.
  * @returns {{
  *   stepResults: Record<string, number|''>,
  *   step1: number|'',
@@ -43,9 +46,18 @@ export function buildActiveStepSheetPayload(completedSteps, activeStageIndices) 
   const resultByIndex = resultMapFromCompleted(completedSteps)
 
   const stepResults = {}
-  for (let stageIndex = 0; stageIndex < TRAINING_STAGE_COUNT; stageIndex += 1) {
-    const key = TRAINING_SHEET_STEP_KEYS[stageIndex]
-    stepResults[key] = cellValueForStage(resultByIndex, stageIndex, activeSet)
+  for (const key of TRAINING_SHEET_STEP_KEYS) {
+    stepResults[key] = ''
+  }
+
+  for (let progressIndex = 0; progressIndex < TRAINING_STAGE_COUNT; progressIndex += 1) {
+    const sheetKey = getSheetKeyForProgressIndex(progressIndex)
+    if (!sheetKey) continue
+    stepResults[sheetKey] = cellValueForProgressIndex(
+      resultByIndex,
+      progressIndex,
+      activeSet,
+    )
   }
 
   const activeScores = indices.map((idx) => resultByIndex[idx] ?? 0)
@@ -72,8 +84,8 @@ export function countFailCountFromCompletedSteps(completedSteps, activeStageIndi
 
 export function extractScoresFromRecord(record) {
   if (!record || typeof record !== 'object') return []
-  if (Array.isArray(record.scores) && record.scores.length >= TRAINING_STAGE_COUNT) {
-    return record.scores.slice(0, TRAINING_STAGE_COUNT)
+  if (Array.isArray(record.scores) && record.scores.length >= TRAINING_SHEET_SLOT_COUNT) {
+    return record.scores.slice(0, TRAINING_SHEET_SLOT_COUNT)
   }
   return TRAINING_SHEET_STEP_KEYS.map((key) => {
     if (record[key] === 0) return 0
@@ -97,7 +109,7 @@ export function countPackedScoresLength(scores) {
   if (fromRecord.length) return fromRecord.length
   const arr = Array.isArray(scores) ? scores : []
   let n = 0
-  for (let i = 0; i < TRAINING_STAGE_COUNT && i < arr.length; i += 1) {
+  for (let i = 0; i < TRAINING_SHEET_SLOT_COUNT && i < arr.length; i += 1) {
     const v = arr[i]
     if (v === '' || v === null || v === undefined) continue
     if (v === 0 || v === 1 || v === '0' || v === '1') n += 1
@@ -108,7 +120,7 @@ export function countPackedScoresLength(scores) {
 export function countFailCountFromPackedScores(scores) {
   const arr = extractScoresFromRecord({ scores })
   let fail = 0
-  for (let i = 0; i < TRAINING_STAGE_COUNT && i < arr.length; i += 1) {
+  for (let i = 0; i < TRAINING_SHEET_SLOT_COUNT && i < arr.length; i += 1) {
     const v = arr[i]
     if (v === '' || v === null || v === undefined) continue
     if (Number(v) === 0) fail += 1
@@ -119,7 +131,7 @@ export function countFailCountFromPackedScores(scores) {
 export function countSuccessFromPackedScores(scores) {
   const arr = extractScoresFromRecord({ scores })
   let ok = 0
-  for (let i = 0; i < TRAINING_STAGE_COUNT && i < arr.length; i += 1) {
+  for (let i = 0; i < TRAINING_SHEET_SLOT_COUNT && i < arr.length; i += 1) {
     const v = arr[i]
     if (v === '' || v === null || v === undefined) continue
     if (Number(v) > 0) ok += 1

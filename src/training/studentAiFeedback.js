@@ -19,6 +19,122 @@ import {
 
 const FEEDBACK_MAX_SENTENCES = 3
 
+const FAILED_STEP_AI_TEXT_LIMITS = {
+  meaning: 80,
+  question: 280,
+  answer: 120,
+}
+
+/** partial·fail + failedStepDetails — 답 비교 우선순위 */
+const FEEDBACK_TIER_STATUS_RULE = [
+  '【feedbackTier 우선】 status는 학습 결과 저장용 값이다.',
+  'AI 피드백 문장 구조·톤·난이도는 반드시 feedbackTier(success/partial/fail)만 따른다.',
+  'status가 "실패"여도 feedbackTier가 partial이면 partial 구조를 쓴다.',
+].join(' ')
+
+const FAILED_STEP_PRIORITY_RULE = [
+  '【우선순위 — failedStepDetails가 있을 때】',
+  '1순위: studentAnswer와 correctAnswer 차이 — 단, 오류 원인을 확실히 판단할 수 있을 때만 구체적으로(부호·숫자 등).',
+  '2순위: primaryFailStep(가장 앞선 실패 단계).',
+  '3순위: problemStrategy(일반 전략).',
+  '차이만으로 원인이 불확실하면 1순위를 억지로 쓰지 말고 2→3순위의 안전한 행동 안내를 쓴다.',
+  '최종 답·정답 전체·풀이 전체를 직접 알려주지 않는다.',
+  '단계명을 그대로 나열하거나 "…하는 단계에서 어려움이"처럼 단계명을 문장에 끼워 넣지 않는다.',
+].join(' ')
+
+/** 구체적이지만 틀린 피드백 방지 */
+const FEEDBACK_ACCURACY_RULE = [
+  '【정확성 우선】 구체적이지만 틀린 피드백보다, 조금 일반적이더라도 정확한 피드백이 낫다.',
+  'studentAnswer와 correctAnswer 차이만으로 부호·계산·단위·식 세우기 오류를 확실히 판단할 수 있을 때만 구체적으로 짚는다.',
+  '확실하지 않으면 오류 유형을 추측하거나 단정하지 않고, primaryFailStep→problemStrategy 순의 안전한 행동 안내를 쓴다.',
+].join(' ')
+
+/** 시간·거리·속력 — 단위 변환 방향 단정 금지 */
+const FEEDBACK_UNIT_SAFETY_RULE = [
+  '【단위 — 보수적】 변환 방향(분→시간, 시간→분 등)이 답 차이만으로 확실하지 않으면 변환 방향을 말하지 않는다.',
+  '안전 예: "시간의 단위가 식에서 서로 맞는지 확인해보자." "거리, 시간, 속력의 단위를 확인한 뒤 식을 세워보자."',
+  '금지: "20분을 분으로 바꿔라"처럼 근거 없는 단위 변환 단정.',
+].join(' ')
+
+/** 최종 문장 품질 */
+const FEEDBACK_SENTENCE_QUALITY_RULE = [
+  '【문장 품질】 2~3문장, 각 문장은 마침표로 끝낸다.',
+  '같은 행동 지시(확인해보자·정리해보자)를 반복하지 않는다.',
+  '마침표 없이 문장을 이어 붙이지 않는다. generic 응원은 수학 피드백이 부족할 때만 1문장.',
+].join(' ')
+
+/** @deprecated FAILED_STEP_PRIORITY_RULE에 통합 — 하위 호환용 별칭 */
+const FAILED_ANSWER_ANALYSIS_PROMPT = FAILED_STEP_PRIORITY_RULE
+
+function clampFailedStepAiText(raw, max) {
+  const t = String(raw ?? '')
+    .replace(/\s+/g, ' ')
+    .trim()
+  if (!t) return ''
+  if (t.length <= max) return t
+  return t.slice(0, max - 1).trim()
+}
+
+function normalizeFailedStepDetailEntry(raw) {
+  if (!raw || typeof raw !== 'object') return null
+  const stepNumberRaw = Number(raw.stepNumber)
+  const stepNumber = Number.isFinite(stepNumberRaw) && stepNumberRaw > 0 ? stepNumberRaw : null
+  const meaning = clampFailedStepAiText(raw.meaning, FAILED_STEP_AI_TEXT_LIMITS.meaning)
+  const question = clampFailedStepAiText(raw.question, FAILED_STEP_AI_TEXT_LIMITS.question)
+  const studentAnswer = clampFailedStepAiText(
+    raw.studentAnswer ?? raw.answer,
+    FAILED_STEP_AI_TEXT_LIMITS.answer,
+  )
+  const correctAnswer = clampFailedStepAiText(raw.correctAnswer, FAILED_STEP_AI_TEXT_LIMITS.answer)
+  const wrongCount = Math.max(0, Math.round(Number(raw.wrongCount) || 0))
+  const hintUsed = Boolean(raw.hintUsed)
+  if (!meaning && !question && !studentAnswer && !correctAnswer && !stepNumber) return null
+  return {
+    stepNumber,
+    meaning,
+    question,
+    studentAnswer,
+    correctAnswer,
+    wrongCount,
+    hintUsed,
+  }
+}
+
+function normalizeFailedStepDetailsArray(raw) {
+  if (!Array.isArray(raw)) return []
+  return raw.map(normalizeFailedStepDetailEntry).filter(Boolean)
+}
+
+/**
+ * completedSteps(메모리)에서 실패 단계만 AI 분석용으로 추출합니다.
+ * @param {object[]} completedSteps
+ * @param {string[]} [stepMeanings]
+ */
+export function buildFailedStepDetailsFromCompletedSteps(completedSteps, stepMeanings = []) {
+  const list = Array.isArray(completedSteps) ? completedSteps : []
+  const meanings = Array.isArray(stepMeanings) ? stepMeanings : []
+  return normalizeFailedStepDetailsArray(
+    list
+      .filter((item) => Number(item?.processResult) === 0)
+      .map((item) => {
+        const stepNumber = Number(item?.stepNumber) || null
+        const meaning =
+          String(item?.label || '').trim() ||
+          (stepNumber && meanings[stepNumber - 1] ? String(meanings[stepNumber - 1]).trim() : '') ||
+          (stepNumber ? `단계 ${stepNumber}` : '')
+        return {
+          stepNumber,
+          meaning,
+          question: item?.question,
+          studentAnswer: item?.answer,
+          correctAnswer: item?.correctAnswer,
+          wrongCount: item?.wrongCount,
+          hintUsed: item?.hintUsed,
+        }
+      }),
+  )
+}
+
 /** 피드백·분석용 단계 표시명 */
 export const FEEDBACK_STEP_LABELS = {
   step1: '무엇을 구하는지 파악',
@@ -33,6 +149,43 @@ export const FEEDBACK_STEP_LABELS = {
 
 const BANNED_CHEER =
   /힘내요|응원해요|MATH-MASTER|MATH-CARD|아자아자|화이팅|최고야|대단해|멋져|보리도사/gi
+
+/** 후처리: 어색한 문장·단위 단정·붙은 문장 보정 */
+function polishStudentFeedbackText(text) {
+  let t = String(text || '').replace(/\s+/g, ' ').trim()
+  if (!t) return ''
+
+  t = t.replace(/,\s*!\s*/g, '. ')
+  t = t.replace(/,\s*$/g, '.')
+  t = t.replace(
+    /\d+\s*분을\s*분으로[^.!?]*/gi,
+    '시간의 단위가 식에서 서로 맞는지 확인해보자',
+  )
+  t = t.replace(
+    /(?:시간을\s*분으로|분을\s*시간으로|분으로\s*바꿔|시간으로\s*바꿔)[^.!?]*/gi,
+    '거리, 시간, 속력의 단위를 확인한 뒤 식을 세워보자',
+  )
+  t = t.replace(/([요다자해])\s+(?=[가-힣])/g, '$1. ')
+  return t.replace(/\s+/g, ' ').trim()
+}
+
+function dedupeSimilarFeedbackSentences(sentences) {
+  const out = []
+  const seen = []
+  for (const raw of sentences) {
+    const s = String(raw || '').trim()
+    if (!s) continue
+    const key = s
+      .replace(/\s+/g, '')
+      .replace(/[.!?…]+$/g, '')
+      .slice(0, 24)
+    if (seen.some((prev) => prev === key || (prev.includes(key) && key.length > 10))) continue
+    if (seen.some((prev) => key.includes(prev) && prev.length > 10)) continue
+    seen.push(key)
+    out.push(s)
+  }
+  return out
+}
 
 /** 피드백 본문에서 카드 획득·미획득 문장 제거 */
 const MATH_CARD_FEEDBACK_LINE =
@@ -222,10 +375,11 @@ export function analyzeStudentStepResult(record) {
     primaryFailStep,
     problemPrinciple,
     problemStrategy,
+    failedStepDetails: normalizeFailedStepDetailsArray(input.failedStepDetails),
   })
 }
 
-function buildFeedbackPromptInstructions(tier) {
+function buildFeedbackPromptInstructions(tier, hasFailedDetails = false) {
   if (tier === 'success') {
     return [
       '【출력】 한국어 2~3문장. 번호·목록 금지.',
@@ -234,10 +388,26 @@ function buildFeedbackPromptInstructions(tier) {
       '실패 단계·어려움·표 그리기 보완 힌트 금지.',
     ].join('\n')
   }
+  if (tier === 'partial' && hasFailedDetails) {
+    return [
+      '【출력 — partial + failedStepDetails】 한국어 2~3문장. 번호·목록 금지.',
+      '1문장: 전체 흐름 또는 잘한 부분을 짧게 인정(예: 전체 흐름은 자연스럽게 이어졌어요).',
+      '2문장: 답 차이로 오류가 확실할 때만 구체적으로 짚고 행동 1개(확인해보자·세워보자).',
+      '확실하지 않으면 primaryFailStep·problemStrategy로 안전하게 안내(예: 조건이 식에 모두 들어갔는지 확인해보자).',
+    ].join('\n')
+  }
   if (tier === 'partial') {
     return [
       '【출력】 한국어 2~3문장. 번호·목록 금지.',
       '1문장: 흐름 인정. 2문장: 약한 단계 1개(확인해보자). 3문장: 행동 전략 1개.',
+    ].join('\n')
+  }
+  if (tier === 'fail' && hasFailedDetails) {
+    return [
+      '【출력 — fail + failedStepDetails】 한국어 2~3문장. 번호·목록 금지.',
+      '1문장: 여러 단계 어려움이 있었음을 짧게(예: 여러 단계에서 어려움이 있었어요).',
+      '2문장: primaryFailStep과 연관된 오류 — 답 차이로 확실할 때만 구체적으로, 아니면 안전한 행동 1개.',
+      '모든 실패를 나열하지 않는다. 단계명을 어색하게 반복하지 않는다. 성공 단계 칭찬 금지.',
     ].join('\n')
   }
   return [
@@ -255,6 +425,9 @@ function tierPromptBlock(tier) {
 export function buildAiFeedbackPrompt(analysis) {
   const a = enrichAnalysisWithOverallPerformance(analysis || analyzeStudentStepResult({}))
   const tier = a.feedbackTier || deriveFeedbackTier(a.fail_count, a.total)
+  const failedStepDetails =
+    tier !== 'success' ? normalizeFailedStepDetailsArray(a.failedStepDetails) : []
+
   const data = {
     feedbackTier: tier,
     overallPerformanceLevel: a.overallPerformanceLevel,
@@ -271,19 +444,39 @@ export function buildAiFeedbackPrompt(analysis) {
     type: a.type || '—',
     status: a.status || '—',
   }
+  if (failedStepDetails.length > 0) {
+    data.failedStepDetails = failedStepDetails
+  }
+
+  const hasFailedDetails = failedStepDetails.length > 0
+  const strategyNote = hasFailedDetails
+    ? 'failedStepDetails: 답 차이로 오류가 확실할 때만 구체적으로. 불확실하면 problemStrategy로 안전하게.'
+    : ''
+  const accuracyBlock =
+    tier !== 'success' && hasFailedDetails
+      ? [FEEDBACK_ACCURACY_RULE, FEEDBACK_UNIT_SAFETY_RULE, FEEDBACK_SENTENCE_QUALITY_RULE].join('\n')
+      : tier !== 'success'
+        ? FEEDBACK_SENTENCE_QUALITY_RULE
+        : ''
 
   return [
     '중1 일차방정식 수련 결과를 바탕으로, 옆에서 짧게 말하는 수학 선생님 톤의 학습 피드백만 작성하세요.',
     '',
     STUDENT_FEEDBACK_VOICE_PROMPT,
     '',
-    buildFeedbackPromptInstructions(tier),
+    tier !== 'success' ? FEEDBACK_TIER_STATUS_RULE : '',
+    tier !== 'success' && hasFailedDetails ? FAILED_STEP_PRIORITY_RULE : '',
+    accuracyBlock,
+    '',
+    buildFeedbackPromptInstructions(tier, hasFailedDetails),
     '',
     MATH_STRATEGY_PROMPT_BLOCK,
-    tierPromptBlock(tier),
+    strategyNote,
+    hasFailedDetails ? '' : tierPromptBlock(tier),
     '',
     '【금지】 문제 지문 인용·요약, 과한 응원(힘내요·응원해요·MATH-MASTER), MATH-CARD·카드 획득/미획득 언급, 단계없음 언급, 빈 단계명·", , ,".',
-    tier === 'fail'
+    '단계명을 문장에 그대로 끼워 넣거나 "…하는 단계에서 어려움이"처럼 어색하게 반복하지 않는다.',
+    tier === 'fail' && !hasFailedDetails
       ? '【중요】 feedbackTier가 fail이면 성공 단계 칭찬 문장을 쓰지 마세요.'
       : '',
     tier === 'success'
@@ -346,14 +539,17 @@ export function generateFallbackFeedback(analysis) {
 }
 
 export function sanitizeStudentFeedback(rawText, analysis) {
-  let text = String(rawText || '')
-    .replace(/\r/g, '\n')
-    .replace(/\*\*([^*]+)\*\*/g, '$1')
-    .replace(/\n+/g, ' ')
-    .replace(/\s+/g, ' ')
-    .trim()
+  let text = polishStudentFeedbackText(
+    String(rawText || '')
+      .replace(/\r/g, '\n')
+      .replace(/\*\*([^*]+)\*\*/g, '$1')
+      .replace(/\n+/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim(),
+  )
 
   text = text.replace(BANNED_CHEER, '')
+  text = polishStudentFeedbackText(text)
   text = text
     .replace(/[^.!?]{1,48}를\s*떠올리고,\s*/g, '')
     .replace(/관계를\s*생각하고\s*/g, '')
@@ -381,7 +577,8 @@ export function sanitizeStudentFeedback(rawText, analysis) {
     return unifyStudentFeedbackTone(replaced)
   })
 
-  const filtered = polished.filter((sentence) => {
+  const filtered = dedupeSimilarFeedbackSentences(
+    polished.filter((sentence) => {
     if (!analysis) return true
     const praisesFail = [...failLabels].some(
       (label) => label && (sentence.includes(`${label} 단계는 안정`) || sentence.includes(`${label}는 잘`)),
@@ -399,9 +596,12 @@ export function sanitizeStudentFeedback(rawText, analysis) {
     }
     if (tier === 'success' && isRemedialToneSentence(sentence)) return false
     return true
-  })
+    }),
+  )
 
-  return stripMathCardMentionsFromFeedback(filtered.join(' ').trim().slice(0, 520))
+  return polishStudentFeedbackText(
+    stripMathCardMentionsFromFeedback(filtered.join(' ').trim().slice(0, 520)),
+  )
 }
 
 export function stripMathCardMentionsFromFeedback(rawText) {

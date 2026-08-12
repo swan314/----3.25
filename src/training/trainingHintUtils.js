@@ -26,6 +26,8 @@ export function findTrainingHintForStep(row, stepIdx, hintsData) {
 }
 
 export function isTrainingHintAvailableForStep(row, stepIdx, hintsData) {
+  // 5단계(index 4): 일반 힌트 CSV 미사용 (추후 스캐폴딩 연결 예정)
+  if (stepIdx === 4) return false
   const matched = findTrainingHintForStep(row, stepIdx, hintsData)
   return isUsableTrainingHintBody(matched?.힌트내용)
 }

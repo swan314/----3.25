@@ -1,7 +1,7 @@
 import Papa from 'papaparse'
 import { normalizeTrainingPedagogyFields } from '../training/trainingProblemMeta.js'
 
-const DEFAULT_TRAINING_CSV_PATH = '/data/training_problems_with_similar_v2.csv'
+const DEFAULT_TRAINING_CSV_PATH = '/data/training_problems_question_final_0810.csv'
 const DEFAULT_MATH_CARDS_CSV_PATH = '/data/math_cards.csv'
 const DEFAULT_LEVEL_KEY = '단계'
 

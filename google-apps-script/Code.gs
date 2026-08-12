@@ -1827,10 +1827,73 @@ function splitFeedbackSentences_(text) {
   return parts.length ? parts : [t];
 }
 
+/** 후처리: 어색한 문장·단위 단정·붙은 문장 보정 */
+function polishStudentFeedbackText_(rawText) {
+  var t = String(rawText != null ? rawText : '').replace(/\s+/g, ' ').trim();
+  if (!t) return '';
+  t = t.replace(/,\s*!\s*/g, '. ');
+  t = t.replace(/,\s*$/g, '.');
+  t = t.replace(/\d+\s*분을\s*분으로[^.!?]*/gi, '시간의 단위가 식에서 서로 맞는지 확인해보자');
+  t = t.replace(
+    /(?:시간을\s*분으로|분을\s*시간으로|분으로\s*바꿔|시간으로\s*바꿔)[^.!?]*/gi,
+    '거리, 시간, 속력의 단위를 확인한 뒤 식을 세워보자'
+  );
+  t = t.replace(/([요다자해])\s+(?=[가-힣])/g, '$1. ');
+  return t.replace(/\s+/g, ' ').trim();
+}
+
+function dedupeSimilarFeedbackSentences_(sentences) {
+  var out = [];
+  var seen = [];
+  var i;
+  for (i = 0; i < sentences.length; i += 1) {
+    var s = String(sentences[i] || '').trim();
+    if (!s) continue;
+    var key = s.replace(/\s+/g, '').replace(/[.!?…]+$/g, '').slice(0, 24);
+    var dup = false;
+    var j;
+    for (j = 0; j < seen.length; j += 1) {
+      if (seen[j] === key || (seen[j].indexOf(key) >= 0 && key.length > 10)) {
+        dup = true;
+        break;
+      }
+      if (key.indexOf(seen[j]) >= 0 && seen[j].length > 10) {
+        dup = true;
+        break;
+      }
+    }
+    if (dup) continue;
+    seen.push(key);
+    out.push(s);
+  }
+  return out;
+}
+
+/** studentAnswer/correctAnswer 비교에 근거한 구체적 수학 피드백 문장 */
+function isSpecificMathFeedbackSentence_(s) {
+  var t = String(s != null ? s : '').trim();
+  if (t.length < 10) return false;
+  if (/부호|[+-]\s*\d|x\s*[-+]|x\s*=\s*\d|조건|많다|적다|계산|나누|곱|식\s*세우|방정식|\d+\s*살/.test(t)) return true;
+  return false;
+}
+
+function boostFromFailedStepDetails_(sentence, details) {
+  if (!Array.isArray(details) || !details.length) return 0;
+  var boost = 0;
+  var t = String(sentence || '');
+  if (isSpecificMathFeedbackSentence_(t)) boost += 10;
+  if (/부호|조건|숫자|계산|식|방정식|\+|\-/.test(t)) boost += 6;
+  return boost;
+}
+
 /** 수학적 힌트 가중치 (높을수록 최종 출력에 우선) */
 function scoreMathHintSentence_(s) {
   var t = String(s || '');
   var score = 0;
+  if (/부호/.test(t)) score += 14;
+  if (/조건|많다|적다|\d+\s*살/.test(t)) score += 10;
+  if (/x\s*[-+]\s*\d|x[-+]\d|[+-]\s*\d/.test(t)) score += 12;
+  if (/x\s*=\s*\d/.test(t)) score += 10;
   if (/10x\s*\+\s*a|10x\+a|10x＋a/i.test(t)) score += 10;
   if (/x\s*\+\s*1/i.test(t)) score += 8;
   if (/\(\s*x\s*\)|를\s*\(?x\)?|미지수\s*x|\bx\s*로\s*(두|잡|설정)|를\s*x로/i.test(t)) score += 6;
@@ -1851,6 +1914,7 @@ function scoreMathHintSentence_(s) {
   // 일반 응원·메타 조언은 우선순위 하향
   if (/다시\s*한번\s*해보자|아자아자|노력이\s*중요|계산\s*끝나면|마지막에\s*꼭\s*확인|구한\s*수를\s*조건에/.test(t))
     score -= 8;
+  if (/분을\s*분으로|시간을\s*분으로|분을\s*시간으로|분으로\s*바꿔|시간으로\s*바꿔/.test(t)) score -= 16;
   if (/^화이팅\.?$/.test(t.trim())) score -= 12;
   return score;
 }
@@ -1858,14 +1922,16 @@ function scoreMathHintSentence_(s) {
 /** 짧은 일반 응원 문장인지 (핵심 힌트와 분리해 마지막 한 줄로만 쓰기) */
 function isGenericCheerSentence_(s) {
   var t = String(s || '').trim();
+  if (isSpecificMathFeedbackSentence_(t)) return false;
   if (t.length > 56) return false;
   if (
-    /다시\s*한번|화이팅|아자아자|도전해볼|해볼까|응원해|노력|최고|대단|멋져|짱|굿|좋았|잘했|힘내|수고했|오늘도|내일도|또\s*보자|가보자|이어가|MATH|마스터/i.test(
+    /다시\s*한번|화이팅|아자아자|도전해볼|해볼까|응원해|노력|최고|대단|멋져|짱|굿|좋았|잘했|힘내|수고했|오늘도|내일도|또\s*보자|가보자|이어가|MATH|마스터|조금만\s*더\s*밀어보자/i.test(
       t
     )
   )
     return true;
-  if (/계산\s*끝나면|확인해보자|물었는지|물어보는/.test(t)) return true;
+  if (/^확인해보자\.?$|^다시\s*확인해보자\.?$|^한\s*번\s*더\s*확인해보자\.?$/.test(t)) return true;
+  if (/계산\s*끝나면|물었는지|물어보는/.test(t)) return true;
   return false;
 }
 
@@ -1877,9 +1943,9 @@ function isUndesirableCheerLine_(s) {
 function shortCheerFromCtx_(ctx) {
   var t = Number(ctx && ctx.total);
   if (!Number.isFinite(t)) t = 0;
-  if (t >= 5) return '다시 한번 도전해볼까? 🙂';
-  if (t >= 3) return '조금만 더 밀어보자, 화이팅!';
-  return '다시 한번 도전해볼까? 🙂';
+  if (t >= 5) return '다시 한번 도전해볼까?';
+  if (t >= 3) return '조금만 더 해보자.';
+  return '다시 한번 도전해볼까?';
 }
 
 /**
@@ -1892,22 +1958,25 @@ function shortCheerFromCtx_(ctx) {
  */
 function compactStudentFeedback_(rawText, ctx) {
   ctx = ctx || {};
-  var text = stripFeedbackBannedPhrases_(rawText);
+  var text = polishStudentFeedbackText_(stripFeedbackBannedPhrases_(rawText));
   text = stripTrainingStageLabels_(text);
   text = softenAnswerLeakHints_(text, ctx.problemText || '');
+  text = polishStudentFeedbackText_(text);
   if (!text) return '';
 
-  var chunks = splitFeedbackSentences_(text);
+  var chunks = dedupeSimilarFeedbackSentences_(splitFeedbackSentences_(text));
   var scored = [];
   var i;
   var stratBoost = String(ctx.problemStrategy || '').trim();
   var princBoost = String(ctx.problemPrinciple || '').trim();
+  var failedDetails = ctx.failedStepDetails;
   for (i = 0; i < chunks.length; i += 1) {
     var c = chunks[i];
     var n = scoreMathHintSentence_(c);
+    n += boostFromFailedStepDetails_(c, failedDetails);
     if (stratBoost && c.indexOf(stratBoost.slice(0, Math.min(12, stratBoost.length))) >= 0) n += 14;
     if (princBoost && c.indexOf(princBoost.slice(0, Math.min(10, princBoost.length))) >= 0) n += 6;
-    scored.push({ s: c, n: n, cheer: isGenericCheerSentence_(c) });
+    scored.push({ s: c, n: n, cheer: isGenericCheerSentence_(c), specific: isSpecificMathFeedbackSentence_(c) });
   }
 
   scored.sort(function (a, b) {
@@ -1915,24 +1984,30 @@ function compactStudentFeedback_(rawText, ctx) {
   });
 
   var mathPick = [];
-  for (i = 0; i < scored.length && mathPick.length < 2; i += 1) {
-    if (scored[i].cheer && scored[i].n <= 0) continue;
-    if (scored[i].n > 0) mathPick.push(scored[i].s);
+  for (i = 0; i < scored.length && mathPick.length < 3; i += 1) {
+    if (scored[i].cheer && scored[i].n <= 0 && !scored[i].specific) continue;
+    if (scored[i].n > 0 || scored[i].specific) mathPick.push(scored[i].s);
   }
 
   if (mathPick.length === 0) {
-    for (i = 0; i < scored.length && mathPick.length < 2; i += 1) {
-      if (!scored[i].cheer || scored[i].n > 0) mathPick.push(scored[i].s);
+    for (i = 0; i < scored.length && mathPick.length < 3; i += 1) {
+      if (!scored[i].cheer || scored[i].n > 0 || scored[i].specific) mathPick.push(scored[i].s);
     }
   }
 
   var core = mathPick.join(' ').replace(/\s+/g, ' ').trim();
-  // 가벼운 구어체 (문장 끝만, 수식 부분은 건드리지 않음)
   core = core
     .replace(/해야\s*합니다\s*$/g, '해야 해')
     .replace(/해야\s*합니다(?=\s|$)/g, '해야 해')
     .replace(/\s+/g, ' ')
     .trim();
+
+  var coreIsStrong =
+    mathPick.length >= 1 &&
+    (mathPick.some(function (line) {
+      return isSpecificMathFeedbackSentence_(line);
+    }) ||
+      mathPick.length >= 2);
 
   var cheerLine = '';
   for (i = chunks.length - 1; i >= 0; i -= 1) {
@@ -1940,26 +2015,27 @@ function compactStudentFeedback_(rawText, ctx) {
     if (
       isGenericCheerSentence_(ch) &&
       scoreMathHintSentence_(ch) <= 0 &&
+      !isSpecificMathFeedbackSentence_(ch) &&
       !isUndesirableCheerLine_(ch)
     ) {
       cheerLine = ch;
       break;
     }
   }
-  if (!cheerLine) {
+  if (!cheerLine && !coreIsStrong) {
     for (i = scored.length - 1; i >= 0; i -= 1) {
-      if (scored[i].cheer && !isUndesirableCheerLine_(scored[i].s)) {
+      if (scored[i].cheer && !isUndesirableCheerLine_(scored[i].s) && !scored[i].specific) {
         cheerLine = scored[i].s;
         break;
       }
     }
   }
-  if (!cheerLine) cheerLine = shortCheerFromCtx_(ctx);
+  if (!cheerLine && !coreIsStrong) cheerLine = shortCheerFromCtx_(ctx);
 
-  if (core && /도전|다시\s*한번|화이팅|해보자|해볼까/.test(core)) cheerLine = '';
+  if (core && (/도전|다시\s*한번|화이팅|해보자|해볼까/.test(core) || coreIsStrong)) cheerLine = '';
 
   var out = core ? core + (cheerLine ? ' ' + cheerLine : '') : cheerLine || '';
-  out = out.replace(/\s+/g, ' ').trim();
+  out = polishStudentFeedbackText_(out.replace(/\s+/g, ' ').trim());
 
   if (out.length > AI_FEEDBACK_CELL_MAX_) {
     out = out.slice(0, AI_FEEDBACK_CELL_MAX_ - 1).trim();
@@ -2257,6 +2333,77 @@ var AWKWARD_FEEDBACK_RE_GAS_ =
 var STUDENT_FEEDBACK_VOICE_PROMPT_GAS_ =
   '【말투 통일】 중1 수학 선생님이 옆에서 짧게 말하는 톤. 해요체. 행동 중심(해보자·확인해보자·정리해보자·이어가 보자). success·partial·fail 같은 말투. 금지: ~필요합니다, ~중요합니다, ~활용하세요/바랍니다, 설명형, 나타났습니다.';
 
+var FAILED_ANSWER_ANALYSIS_PROMPT_GAS_ =
+  '【우선순위 — failedStepDetails가 있을 때】 ' +
+  '1순위: studentAnswer와 correctAnswer 차이 — 오류 원인을 확실히 판단할 수 있을 때만 구체적으로(부호·숫자 등). ' +
+  '2순위: primaryFailStep(가장 앞선 실패 단계). ' +
+  '3순위: problemStrategy(일반 전략). ' +
+  '차이만으로 원인이 불확실하면 1순위를 억지로 쓰지 말고 2→3순위의 안전한 행동 안내를 쓴다. ' +
+  '최종 답·정답 전체·풀이 전체를 직접 알려주지 않는다. ' +
+  '단계명을 그대로 나열하거나 "...하는 단계에서 어려움이"처럼 단계명을 문장에 끼워 넣지 않는다.';
+
+var FEEDBACK_ACCURACY_RULE_GAS_ =
+  '【정확성 우선】 구체적이지만 틀린 피드백보다, 조금 일반적이더라도 정확한 피드백이 낫다. ' +
+  'studentAnswer와 correctAnswer 차이만으로 부호·계산·단위·식 세우기 오류를 확실히 판단할 수 있을 때만 구체적으로 짚는다. ' +
+  '확실하지 않으면 오류 유형을 추측하거나 단정하지 않고, primaryFailStep→problemStrategy 순의 안전한 행동 안내를 쓴다.';
+
+var FEEDBACK_UNIT_SAFETY_RULE_GAS_ =
+  '【단위 — 보수적】 변환 방향(분→시간, 시간→분 등)이 답 차이만으로 확실하지 않으면 변환 방향을 말하지 않는다. ' +
+  '안전 예: "시간의 단위가 식에서 서로 맞는지 확인해보자." "거리, 시간, 속력의 단위를 확인한 뒤 식을 세워보자." ' +
+  '금지: "20분을 분으로 바꿔라"처럼 근거 없는 단위 변환 단정.';
+
+var FEEDBACK_SENTENCE_QUALITY_RULE_GAS_ =
+  '【문장 품질】 2~3문장, 각 문장은 마침표로 끝낸다. ' +
+  '같은 행동 지시(확인해보자·정리해보자)를 반복하지 않는다. ' +
+  '마침표 없이 문장을 이어 붙이지 않는다. generic 응원은 수학 피드백이 부족할 때만 1문장.';
+
+var FEEDBACK_TIER_STATUS_RULE_GAS_ =
+  '【feedbackTier 우선】 status는 학습 결과 저장용 값이다. ' +
+  'AI 피드백 문장 구조·톤·난이도는 반드시 feedbackTier(success/partial/fail)만 따른다. ' +
+  'status가 "실패"여도 feedbackTier가 partial이면 partial 구조를 쓴다.';
+
+function clampFailedStepAiTextGAS_(raw, maxLen) {
+  var t = String(raw != null ? raw : '')
+    .replace(/\s+/g, ' ')
+    .trim();
+  if (!t) return '';
+  if (t.length <= maxLen) return t;
+  return t.slice(0, maxLen - 1).trim();
+}
+
+function normalizeFailedStepDetailsArrayGAS_(raw) {
+  if (!Array.isArray(raw)) return [];
+  var out = [];
+  var i;
+  for (i = 0; i < raw.length; i += 1) {
+    var item = raw[i];
+    if (!item || typeof item !== 'object') continue;
+    var stepNum = Number(item.stepNumber);
+    var meaning = clampFailedStepAiTextGAS_(item.meaning, 80);
+    var question = clampFailedStepAiTextGAS_(item.question, 280);
+    var studentAnswer = clampFailedStepAiTextGAS_(
+      item.studentAnswer != null ? item.studentAnswer : item.answer,
+      120
+    );
+    var correctAnswer = clampFailedStepAiTextGAS_(item.correctAnswer, 120);
+    var wrongCount = Math.max(0, Math.round(Number(item.wrongCount) || 0));
+    var hintUsed = Boolean(item.hintUsed);
+    if (!meaning && !question && !studentAnswer && !correctAnswer && !Number.isFinite(stepNum)) {
+      continue;
+    }
+    out.push({
+      stepNumber: Number.isFinite(stepNum) && stepNum > 0 ? stepNum : null,
+      meaning: meaning,
+      question: question,
+      studentAnswer: studentAnswer,
+      correctAnswer: correctAnswer,
+      wrongCount: wrongCount,
+      hintUsed: hintUsed,
+    });
+  }
+  return out;
+}
+
 function unifyStudentFeedbackToneGAS_(sentence) {
   var t = String(sentence || '').replace(/\s+/g, ' ').trim();
   if (!t) return '';
@@ -2524,6 +2671,7 @@ function attachOverallPerformanceToAnalysis_(a) {
       overallPerformanceSummarySentenceGAS_(level),
     feedbackTier: feedbackTier,
     feedbackEmphasis: emphasis,
+    failedStepDetails: normalizeFailedStepDetailsArrayGAS_(base.failedStepDetails),
   };
 }
 
@@ -2545,6 +2693,7 @@ function normalizeFeedbackAnalysisCore_(a) {
     overallPerformanceSummary: String(src.overallPerformanceSummary || '').trim(),
     feedbackTier: String(src.feedbackTier || '').trim(),
     feedbackEmphasis: String(src.feedbackEmphasis || '').trim(),
+    failedStepDetails: normalizeFailedStepDetailsArrayGAS_(src.failedStepDetails),
   };
 }
 
@@ -2602,6 +2751,7 @@ function analysisFromLegacyAiPayload_(pl) {
     primaryFailStep: failSteps.length ? failSteps[0] : null,
     problemPrinciple: String(meta.problemPrinciple || pl.problemPrinciple || '').trim(),
     problemStrategy: String(meta.problemStrategy || pl.problemStrategy || '').trim(),
+    failedStepDetails: normalizeFailedStepDetailsArrayGAS_(pl.failedStepDetails),
   };
 }
 
@@ -2657,17 +2807,33 @@ function resolveFeedbackAnalysis_(pl) {
   return analysisFromLegacyAiPayload_(payload);
 }
 
-function buildFeedbackPromptInstructionsGAS_(tier) {
+function buildFeedbackPromptInstructionsGAS_(tier, hasFailedDetails) {
   if (tier === 'success') {
     return (
       '【출력】 한국어 2~3문장. 번호·목록 금지.\n' +
       '1문장: 흐름 안정. 2문장: 잘 이어진 단계. 3문장: 습관·전략 유지(이어가 보자). 실패·보완 힌트 금지.'
     );
   }
+  if (tier === 'partial' && hasFailedDetails) {
+    return (
+      '【출력 — partial + failedStepDetails】 한국어 2~3문장. 번호·목록 금지.\n' +
+      '1문장: 전체 흐름 또는 잘한 부분을 짧게 인정(예: 전체 흐름은 자연스럽게 이어졌어요).\n' +
+      '2문장: 답 차이로 오류가 확실할 때만 구체적으로 짚고 행동 1개(확인해보자·세워보자).\n' +
+      '확실하지 않으면 primaryFailStep·problemStrategy로 안전하게 안내(예: 조건이 식에 모두 들어갔는지 확인해보자).'
+    );
+  }
   if (tier === 'partial') {
     return (
       '【출력】 한국어 2~3문장. 번호·목록 금지.\n' +
       '1문장: 흐름 인정. 2문장: 약한 단계(확인해보자). 3문장: 행동 전략 1개.'
+    );
+  }
+  if (tier === 'fail' && hasFailedDetails) {
+    return (
+      '【출력 — fail + failedStepDetails】 한국어 2~3문장. 번호·목록 금지.\n' +
+      '1문장: 여러 단계 어려움이 있었음을 짧게(예: 여러 단계에서 어려움이 있었어요).\n' +
+      '2문장: primaryFailStep과 연관된 오류 — 답 차이로 확실할 때만 구체적으로, 아니면 안전한 행동 1개.\n' +
+      '모든 실패를 나열하지 않는다. 단계명을 어색하게 반복하지 않는다. 성공 단계 칭찬 금지.'
     );
   }
   return (
@@ -2712,17 +2878,42 @@ function buildAiFeedbackPromptFromAnalysis_(analysis) {
   for (i = 0; i < a.failSteps.length; i += 1) {
     data.failSteps.push(a.failSteps[i].label);
   }
-  var extraFail = tier === 'fail' ? '\n【중요】 feedbackTier=fail이면 성공 단계 칭찬 금지.\n' : '';
+  var failedStepDetails =
+    tier !== 'success' ? normalizeFailedStepDetailsArrayGAS_(a.failedStepDetails) : [];
+  if (failedStepDetails.length > 0) {
+    data.failedStepDetails = failedStepDetails;
+  }
+  var hasFailedDetails = failedStepDetails.length > 0;
+  var strategyNote = hasFailedDetails
+    ? 'failedStepDetails: 답 차이로 오류가 확실할 때만 구체적으로. 불확실하면 problemStrategy로 안전하게.'
+    : '';
+  var accuracyBlock =
+    tier !== 'success' && hasFailedDetails
+      ? FEEDBACK_ACCURACY_RULE_GAS_ +
+        '\n' +
+        FEEDBACK_UNIT_SAFETY_RULE_GAS_ +
+        '\n' +
+        FEEDBACK_SENTENCE_QUALITY_RULE_GAS_
+      : tier !== 'success'
+        ? FEEDBACK_SENTENCE_QUALITY_RULE_GAS_
+        : '';
+  var extraFail =
+    tier === 'fail' && !hasFailedDetails ? '\n【중요】 feedbackTier=fail이면 성공 단계 칭찬 금지.\n' : '';
   var extraSuccess =
     tier === 'success' ? '\n【중요】 feedbackTier=success이면 실패·보완 힌트 금지.\n' : '';
   return (
     '중1 일차방정식 수련 결과를 바탕으로, 옆에서 짧게 말하는 수학 선생님 톤의 학습 피드백만 작성하세요.\n\n' +
     STUDENT_FEEDBACK_VOICE_PROMPT_GAS_ +
     '\n\n' +
-    buildFeedbackPromptInstructionsGAS_(tier) +
+    (tier !== 'success' ? FEEDBACK_TIER_STATUS_RULE_GAS_ + '\n\n' : '') +
+    (tier !== 'success' && hasFailedDetails ? FAILED_ANSWER_ANALYSIS_PROMPT_GAS_ + '\n\n' : '') +
+    accuracyBlock +
+    (accuracyBlock ? '\n\n' : '') +
+    buildFeedbackPromptInstructionsGAS_(tier, hasFailedDetails) +
     '\n\n【수학 전략】 짧은 행동 힌트. "~를 떠올려" 금지. problemStrategy 35~55자.\n' +
-    tierPromptBlockGAS_(tier) +
-    '\n【금지】 문제 지문 인용·과한 응원·MATH-CARD·단계없음.' +
+    strategyNote +
+    (hasFailedDetails ? '' : '\n' + tierPromptBlockGAS_(tier)) +
+    '\n【금지】 문제 지문 인용·과한 응원·MATH-CARD·단계없음. 단계명을 문장에 그대로 끼워 넣거나 "...하는 단계에서 어려움이"처럼 어색하게 반복하지 않는다.' +
     extraFail +
     extraSuccess +
     '\n【분석 데이터】\n' +
@@ -2731,13 +2922,16 @@ function buildAiFeedbackPromptFromAnalysis_(analysis) {
 }
 
 function sanitizeFeedbackTextFromAnalysis_(rawText, analysis) {
-  var text = String(rawText != null ? rawText : '')
-    .replace(/\r/g, ' ')
-    .replace(/\n+/g, ' ')
-    .replace(/\*\*([^*]+)\*\*/g, '$1')
-    .replace(/\s+/g, ' ')
-    .trim();
+  var text = polishStudentFeedbackText_(
+    String(rawText != null ? rawText : '')
+      .replace(/\r/g, ' ')
+      .replace(/\n+/g, ' ')
+      .replace(/\*\*([^*]+)\*\*/g, '$1')
+      .replace(/\s+/g, ' ')
+      .trim()
+  );
   text = text.replace(/힘내요|응원해요|MATH-MASTER|MATH-CARD|아자아자|화이팅|보리도사/gi, '');
+  text = polishStudentFeedbackText_(text);
   text = text
     .replace(/[^.!?]{1,48}를\s*떠올리고,\s*/g, '')
     .replace(/관계를\s*생각하고\s*/g, '')
@@ -2768,7 +2962,7 @@ function sanitizeFeedbackTextFromAnalysis_(rawText, analysis) {
     out.push(s);
     if (out.length >= 3) break;
   }
-  text = out.join(' ').trim();
+  text = polishStudentFeedbackText_(dedupeSimilarFeedbackSentences_(out).join(' ').trim());
   if (text.length > 520) text = text.slice(0, 520).trim();
   return text;
 }
@@ -2823,7 +3017,7 @@ function generateAIFeedback_(payload) {
     ? String(pl.prompt)
     : buildAiFeedbackPromptFromAnalysis_(analysis);
   var system =
-    '너는 중1 수학 선생님이 옆에서 짧게 말한다. success/partial/fail 모두 같은 해요체·행동 중심 말투(해보자·확인해보자·정리해보자). 2~3문장. success면 보완 힌트 금지, fail이면 칭찬 금지. ~필요합니다·~중요합니다·설명형 금지.';
+    '너는 중1 수학 선생님이 옆에서 짧게 말한다. success/partial/fail 모두 같은 해요체·행동 중심 말투(해보자·확인해보자·정리해보자). 2~3문장. success면 보완 힌트 금지, fail이면 칭찬 금지. ~필요합니다·~중요합니다·설명형 금지. 확실하지 않은 오류는 추측하지 말고 안전한 행동 안내만.';
 
   var body = {
     model: 'gpt-4o-mini',
@@ -2868,6 +3062,7 @@ function generateAIFeedback_(payload) {
         problemPrinciple: analysisFull.problemPrinciple,
         problemStrategy: analysisFull.problemStrategy,
         total: analysisFull.total,
+        failedStepDetails: analysisFull.failedStepDetails,
       };
       var compacted = compactStudentFeedback_(cleaned, ctxFb);
       if (compacted) cleaned = compacted;

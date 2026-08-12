@@ -4,6 +4,7 @@ import {
   pairExampleContentAndAnswer,
   pickRandomStepPractice,
 } from '../training/stepTrainingContent'
+import { formatStepTrainingExampleBlockHtml } from '../training/stepTrainingExampleDisplay'
 import { getTrainingKeyDisplayLabel } from '../training/trainingKeyLabels'
 import { choiceAnswerTextMatch } from '../training/trainingChoiceUtils'
 import StepPracticeMathInput from './StepPracticeMathInput'
@@ -62,8 +63,8 @@ function StepTrainingHtmlBlock({ html, className = '', compact = false }) {
     <div
       className={[
         compact
-          ? 'rounded-md border border-slate-200/80 bg-white px-2.5 py-2 text-xs leading-normal text-slate-700 sm:text-sm [&_.mm-inline-math]:align-middle'
-          : 'rounded-lg border border-slate-200/80 bg-white px-4 py-3 text-sm leading-relaxed text-slate-700 sm:text-base [&_.mm-inline-math]:align-middle',
+          ? 'rounded-md border border-slate-200/80 bg-white px-2.5 py-2 text-sm leading-relaxed text-slate-700 sm:text-[0.9375rem] [&_.mm-inline-math]:align-middle'
+          : 'rounded-lg border border-slate-200/80 bg-white px-4 py-3 text-base leading-loose text-slate-700 sm:text-[1.125rem] [&_.mm-inline-math]:align-middle',
         className,
       ]
         .filter(Boolean)
@@ -80,6 +81,13 @@ const STEP_TRAINING_MATH_TEXT_CLASS =
 /** 2열 모드 예제·연습 — 기존 compact 대비 약간 축소 */
 const STEP_TRAINING_MATH_TEXT_CLASS_COMPACT =
   'text-[0.9rem] leading-normal text-slate-700 sm:text-[1.025rem] [&_.mm-inline-math]:align-middle [&_br]:hidden'
+
+/** 예제 세로형 루트 (구조화 HTML — 줄바꿈은 step-example-block CSS) */
+const STEP_EXAMPLE_ROOT_CLASS =
+  'step-example-root text-left text-[1.1375rem] leading-relaxed text-slate-700 sm:text-[1.3rem] [&_.mm-inline-math]:align-middle'
+
+const STEP_EXAMPLE_ROOT_CLASS_COMPACT =
+  'step-example-root text-left text-[0.9rem] leading-normal text-slate-700 sm:text-[1.025rem] [&_.mm-inline-math]:align-middle'
 
 const STEP_ANSWER_LABEL_CLASS = 'font-normal text-slate-500'
 const STEP_ANSWER_VALUE_CLASS =
@@ -106,35 +114,40 @@ function StepAnswerInline({ answer, textClass = '', compact = false }) {
   )
 }
 
-function StepExamplePairs({ content, answer, compact = false }) {
+function StepExamplePairs({ content, answer, trainingKey = '', compact = false }) {
   const pairs = pairExampleContentAndAnswer(content, answer)
-  const textClass = compact ? STEP_TRAINING_MATH_TEXT_CLASS_COMPACT : STEP_TRAINING_MATH_TEXT_CLASS
+  const rootClass = compact ? STEP_EXAMPLE_ROOT_CLASS_COMPACT : STEP_EXAMPLE_ROOT_CLASS
 
   return (
     <div className={compact ? 'space-y-2' : 'space-y-3'}>
-      {pairs.map((pair, pairIndex) => (
-        <div
-          key={`pair-${pairIndex}`}
-          className={[
-            'flex items-start justify-between gap-2 rounded-lg border border-slate-200/80 bg-white',
-            compact
-              ? 'flex-nowrap overflow-x-auto px-2.5 py-1.5'
-              : 'flex-wrap px-4 py-3 sm:gap-4',
-          ].join(' ')}
-        >
+      {pairs.map((pair, pairIndex) => {
+        let blockText = String(pair.problem || '').trim()
+        const ans = String(pair.answer || '').trim()
+        if (ans && ans !== 'skip') {
+          const ansBody = ans.replace(/^[①②③④⑤⑥⑦⑧⑨⑩]\s*/, '').trim()
+          if (ansBody && !blockText.includes(ansBody)) {
+            blockText = `${blockText}\n${ansBody}`
+          }
+        }
+        if (!blockText) return null
+
+        return (
           <div
+            key={`pair-${pairIndex}`}
             className={[
-              'font-normal',
-              textClass,
-              compact ? 'shrink-0 whitespace-nowrap' : 'min-w-0 flex-1',
+              'rounded-lg border border-slate-200/80 bg-white text-left',
+              compact ? 'px-2.5 py-2' : 'px-4 py-3',
             ].join(' ')}
-            dangerouslySetInnerHTML={{
-              __html: formatStepTrainingContentHtml(pair.problem),
-            }}
-          />
-          <StepAnswerInline answer={pair.answer} textClass={textClass} compact={compact} />
-        </div>
-      ))}
+          >
+            <div
+              className={rootClass}
+              dangerouslySetInnerHTML={{
+                __html: formatStepTrainingExampleBlockHtml(blockText, trainingKey),
+              }}
+            />
+          </div>
+        )
+      })}
     </div>
   )
 }
@@ -146,6 +159,8 @@ function ConceptFocusedLearningCard({
   practiceResult,
   onPracticeInputChange,
   onCheckAnswer,
+  onClose,
+  returnButtonLabel = '원래 문제로 돌아가기',
   layoutMode = 'single',
 }) {
   const isCorrect = practiceResult === 'correct'
@@ -183,10 +198,10 @@ function ConceptFocusedLearningCard({
     >
       <h4
         className={[
-          'shrink-0 font-semibold text-slate-800',
+          'shrink-0 font-bold text-slate-800',
           compact
-            ? 'mb-2 text-center text-[1.05rem] leading-snug'
-            : 'mb-4 text-base leading-snug',
+            ? 'mb-2 text-center text-[1.15rem] leading-snug sm:text-lg'
+            : 'mb-4 text-lg leading-snug sm:text-xl',
         ].join(' ')}
       >
         {getTrainingKeyDisplayLabel(bundle.trainingKey)}
@@ -217,6 +232,7 @@ function ConceptFocusedLearningCard({
                   key={`ex-${bundle.trainingKey}-${rowIndex}`}
                   content={row.content}
                   answer={row.answer}
+                  trainingKey={bundle.trainingKey}
                   compact={compact}
                 />
               ))}
@@ -236,9 +252,8 @@ function ConceptFocusedLearningCard({
               className={[
                 'rounded-lg bg-white transition-colors',
                 practiceBoxBorderClass,
-                compact
-                  ? 'flex flex-col gap-3 px-2.5 py-2.5'
-                  : 'space-y-4 px-4 py-4',
+                'flex flex-col gap-3 px-2.5 py-2.5 sm:px-4 sm:py-4',
+                !compact ? 'sm:gap-4' : '',
               ].join(' ')}
             >
               <div
@@ -266,7 +281,7 @@ function ConceptFocusedLearningCard({
               </div>
 
               {!isCorrect ? (
-                <div className={compact ? 'flex shrink-0 flex-col gap-2.5' : 'contents'}>
+                <>
                   <StepPracticeMathInput
                     inputId={`step-practice-${bundle.trainingKey}`}
                     value={practiceInput}
@@ -288,10 +303,8 @@ function ConceptFocusedLearningCard({
                   >
                     정답 확인
                   </button>
-                </div>
-              ) : null}
-
-              {isCorrect ? (
+                </>
+              ) : (
                 <p
                   className={[
                     'shrink-0 rounded-lg border border-emerald-200 bg-emerald-50 font-medium text-emerald-800',
@@ -302,7 +315,20 @@ function ConceptFocusedLearningCard({
                     ? '잘했어요! 이제 원래 문제에 적용해봅시다.'
                     : '잘했어요! 아래 버튼으로 원래 문제로 돌아가서 다시 해결해봅시다.'}
                 </p>
-              ) : null}
+              )}
+
+              <button
+                type="button"
+                onClick={onClose}
+                className={[
+                  'w-full rounded-xl bg-emerald-600 font-semibold text-white transition hover:bg-emerald-700',
+                  compact
+                    ? 'px-4 py-2 text-xs sm:text-sm'
+                    : 'px-6 py-2.5 text-sm sm:px-7 sm:text-base',
+                ].join(' ')}
+              >
+                {returnButtonLabel}
+              </button>
             </div>
           </section>
         ) : null}
@@ -315,6 +341,8 @@ export default function StepFocusedLearningModal({
   open,
   onClose,
   stageLabel = '',
+  dialogTitle = '단계 집중 학습',
+  returnButtonLabel = '원래 문제로 돌아가기',
   conceptBundles = [],
 }) {
   const [offset, setOffset] = useState({ x: 0, y: 0 })
@@ -460,7 +488,7 @@ export default function StepFocusedLearningModal({
               id="step-focused-learning-title"
               className="text-base font-bold leading-snug text-slate-900 sm:text-lg"
             >
-              단계 집중 학습
+              {dialogTitle}
             </h3>
             {stageLabel ? (
               <p className="text-sm font-medium leading-relaxed text-slate-600">{stageLabel}</p>
@@ -496,22 +524,12 @@ export default function StepFocusedLearningModal({
                     handlePracticeInputChange(bundle.trainingKey, value)
                   }
                   onCheckAnswer={() => handleCheckAnswer(bundle.trainingKey)}
+                  onClose={onClose}
+                  returnButtonLabel={returnButtonLabel}
                 />
               ))}
             </div>
           )}
-        </div>
-
-        <div className="shrink-0 border-t border-slate-200 px-4 py-4 sm:px-5">
-          <div className="flex justify-center">
-            <button
-              type="button"
-              onClick={onClose}
-              className="inline-flex w-auto rounded-xl bg-emerald-600 px-6 py-2.5 text-sm font-semibold text-white transition hover:bg-emerald-700 sm:px-7"
-            >
-              원래 문제로 돌아가기
-            </button>
-          </div>
         </div>
 
         {wrongAlertKey ? <StepPracticeWrongAlert onDismiss={dismissWrongAlert} /> : null}

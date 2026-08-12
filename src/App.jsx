@@ -8,7 +8,7 @@ import TrainingMode from './TrainingMode'
 import {
   MM_TRAINING_LAUNCH_KEY,
   createTrainingLaunchFromDiagnostic,
-  formatDiagnosticCharacterLabel,
+  getCharacterDisplayName,
   resolveCanonicalDiagnosticTier,
 } from './levelConfig'
 import { DEFAULT_CLASS_CODE, normalizeClassCode } from './classCode'
@@ -1169,7 +1169,7 @@ export default function App() {
               />
               <div className="rounded-2xl border border-violet-100 bg-violet-50/70 p-3.5 text-left sm:p-4">
                 <p className="text-base font-black text-violet-900 sm:text-lg">
-                  {formatDiagnosticCharacterLabel(getLevelFromPlan(trainingPlan))}
+                  {getCharacterDisplayName(getLevelFromPlan(trainingPlan))}
                 </p>
                 <p className="mt-1.5 text-sm leading-relaxed text-slate-700 sm:text-[0.9375rem]">
                   {{

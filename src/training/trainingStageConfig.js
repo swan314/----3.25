@@ -1,7 +1,10 @@
-/** 수련 문제 CSV 8단계 정의 (1/6 ~ 6/6, 5/6은 5-1~5-3 분할) */
-export const TRAINING_STAGE_COUNT = 8
+/** 학생 본 진행 6단계 (1/6 ~ 6/6) */
+export const TRAINING_STAGE_COUNT = 6
 
-/** 시트·저장 payload 단계 키 (TRAINING_STAGES 순서와 동일) */
+/** Google Sheet 물리 슬롯 8칸 (step5_2·step5_3 열 유지, 신규 기록은 빈칸) */
+export const TRAINING_SHEET_SLOT_COUNT = 8
+
+/** 시트·저장 payload 단계 키 (열 위치 고정 — 변경하지 않음) */
 export const TRAINING_SHEET_STEP_KEYS = [
   'step1',
   'step2',
@@ -12,6 +15,16 @@ export const TRAINING_SHEET_STEP_KEYS = [
   'step5_3',
   'step6',
 ]
+
+/** 본 진행 index(0~5) → Sheet 키 */
+export const PROGRESS_INDEX_TO_SHEET_KEY = {
+  0: 'step1',
+  1: 'step2',
+  2: 'step3',
+  3: 'step4',
+  4: 'step5_1',
+  5: 'step6',
+}
 
 export const TRAINING_STAGES = [
   {
@@ -48,31 +61,12 @@ export const TRAINING_STAGES = [
     hintOrder: '4',
   },
   {
-    id: 'step5_1',
-    qKey: '5/6-step1문제',
-    gradeKey: '5/6-step1정답',
-    trainingKeyCol: 'step5_1_training',
-    displayLabel: '5-1단계',
+    id: 'step5',
+    qKey: '5/6문제',
+    gradeKey: '5/6정답',
+    displayLabel: '5단계',
     isChoice: false,
-    hintOrder: '5_1',
-  },
-  {
-    id: 'step5_2',
-    qKey: '5/6-step2문제',
-    gradeKey: '5/6-step2정답',
-    trainingKeyCol: 'step5_2_training',
-    displayLabel: '5-2단계',
-    isChoice: false,
-    hintOrder: '5_2',
-  },
-  {
-    id: 'step5_3',
-    qKey: '5/6-step3문제',
-    gradeKey: '5/6-step3정답',
-    trainingKeyCol: 'step5_3_training',
-    displayLabel: '5-3단계',
-    isChoice: false,
-    hintOrder: '5_3',
+    hintOrder: '5',
   },
   {
     id: 'step6',
@@ -84,17 +78,19 @@ export const TRAINING_STAGES = [
   },
 ]
 
-/** AI·결과 화면용 단계 의미 (표시 라벨과 별개) */
+/** AI·결과 화면용 단계 의미 */
 export const TRAINING_STEP_MEANINGS = [
-  '무엇을 구하는지 파악',
+  '문제에서 구하려는 것 확인',
   '미지수 설정',
-  '문제 상황을 식으로 표현',
+  '필요한 양을 식으로 표현',
   '방정식 세우기',
-  '방정식 풀기 (식 정리)',
-  '방정식 풀기 (항 이동)',
-  '방정식 풀기 (계수 나누기)',
-  '구한 값을 문제 상황에 맞게 해석',
+  '방정식 풀기',
+  '문제에서 요구하는 답 구하기',
 ]
+
+export function getSheetKeyForProgressIndex(progressIndex) {
+  return PROGRESS_INDEX_TO_SHEET_KEY[progressIndex] ?? null
+}
 
 export function getTrainingStage(stepIdx) {
   return TRAINING_STAGES[stepIdx] ?? null
@@ -123,23 +119,16 @@ export function getStageChoiceGradeAnswer(row, stage) {
   return String(row[stage.choiceGradeKey] ?? '').trim()
 }
 
-export function getStageTrainingKey(row, stage) {
-  if (!row || !stage?.trainingKeyCol) return ''
-  return String(row[stage.trainingKeyCol] ?? '').trim()
-}
-
-/** CSV training_key: 빈칸·skip이면 false */
+/** CSV training_key: 빈칸·skip이면 false (레거시 참고용) */
 export function isStageTrainingKeyVisible(trainingKeyRaw) {
   const key = String(trainingKeyRaw ?? '').trim()
   if (!key) return false
   return key.toLowerCase() !== 'skip'
 }
 
-/** step5_1~5_3이고 training_key가 유효할 때만 단계 집중 학습 버튼 표시 */
-export function shouldShowStepFocusedLearningButton(row, stepIdx) {
-  const stage = getTrainingStage(stepIdx)
-  if (!stage?.trainingKeyCol) return false
-  return isStageTrainingKeyVisible(getStageTrainingKey(row, stage))
+/** 1차: 집중학습·스캐폴딩 UI 비활성 (추후 STEP5_SUPPORT_ENABLED 등으로 연결) */
+export function shouldShowStepFocusedLearningButton(/* row, stepIdx */) {
+  return false
 }
 
 /** CSV 셀의 training_key 목록 (쉼표 구분, 빈칸·skip 제외) */
@@ -162,14 +151,19 @@ export function isTrainingStageActive(row, stage) {
 }
 
 /**
- * 현재 문제 행 기준 실제 진행할 단계 인덱스(0~7, TRAINING_STAGES 순서).
+ * 모든 문항 6단계 고정 진행 index [0..5].
  * @returns {number[]}
  */
 export function getActiveTrainingStageIndices(row) {
   if (!row) return []
-  return TRAINING_STAGES.map((stage, index) => ({ stage, index }))
-    .filter(({ stage }) => isTrainingStageActive(row, stage))
-    .map(({ index }) => index)
+  const indices = []
+  for (let i = 0; i < TRAINING_STAGE_COUNT; i += 1) {
+    const stage = TRAINING_STAGES[i]
+    if (stage && isTrainingStageActive(row, stage)) {
+      indices.push(i)
+    }
+  }
+  return indices.length ? indices : [0, 1, 2, 3, 4, 5]
 }
 
 export function getFirstActiveTrainingStageIndex(row) {
@@ -187,11 +181,17 @@ export function getNextActiveTrainingStageIndex(row, currentIndex) {
 
 export function isLastActiveTrainingStageIndex(row, currentIndex) {
   const indices = getActiveTrainingStageIndices(row)
-  if (!indices.length) return true
+  if (!indices.length) return currentIndex === TRAINING_STAGE_COUNT - 1
   return indices[indices.length - 1] === currentIndex
 }
 
-/** 정답이 x=숫자 형태면 계수 나누기(숫자만 입력) 단계 */
+export function isSecondToLastActiveTrainingStageIndex(row, currentIndex) {
+  const indices = getActiveTrainingStageIndices(row)
+  if (indices.length < 2) return false
+  return indices[indices.length - 2] === currentIndex
+}
+
+/** 정답이 x=숫자 형태면 숫자만 입력 UI (5단계) */
 export function isXValueNumericAnswer(expectedRaw) {
   const compact = String(expectedRaw ?? '')
     .trim()

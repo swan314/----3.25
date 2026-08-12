@@ -113,6 +113,21 @@ export function getCharacterNameForTier(tierKey) {
   return DIAGNOSTIC_TIER_CHARACTER_NAME[tierKey] ?? DIAGNOSTIC_TIER_CHARACTER_NAME.하
 }
 
+/** 화면 표시용 캐릭터명 — `(하)` 등 티어 꼬리표는 제거, 내부 tier 값은 유지 */
+export function getCharacterDisplayName(rawOrTier) {
+  const text = String(rawOrTier ?? '').trim()
+  if (!text) return getCharacterNameForTier('하')
+
+  const withoutTierSuffix = text.replace(/\(\s*(최상|상|중|하)\s*\)\s*$/, '').trim()
+  if (withoutTierSuffix && withoutTierSuffix !== text) return withoutTierSuffix
+
+  if (Object.prototype.hasOwnProperty.call(DIAGNOSTIC_TIER_CHARACTER_NAME, text)) {
+    return getCharacterNameForTier(text)
+  }
+
+  return withoutTierSuffix || getCharacterNameForTier(resolveCanonicalDiagnosticTier(text))
+}
+
 /** 진단 완료 등에서 시트와 동일한 라벨: `손오공(최상)`, `샤오(상)` … */
 export function formatDiagnosticCharacterLabel(tierKeyOrRaw) {
   const key = resolveCanonicalDiagnosticTier(tierKeyOrRaw)

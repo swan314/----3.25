@@ -7,6 +7,7 @@ import samjangImg from './assets/samjang.png'
 import okdongjaImg from './assets/okdongja.png'
 import { normalizeClassCode } from './classCode'
 import {
+  getCharacterDisplayName,
   getCharacterNameForTier,
   LEVEL_PROBLEM_SETS,
   resolveCanonicalDiagnosticTier,
@@ -58,14 +59,14 @@ import {
   getStageChoiceGradeAnswer,
   getStageGradeAnswer,
   getStageQuestionText,
-  getStageTrainingKey,
   isLastActiveTrainingStageIndex,
+  isSecondToLastActiveTrainingStageIndex,
   isXValueNumericAnswer,
-  shouldShowStepFocusedLearningButton,
   TRAINING_STAGE_COUNT,
   TRAINING_STEP_MEANINGS,
 } from './training/trainingStageConfig'
 import { matchesScaffoldExpected } from './training/scaffoldUtils'
+import { matchesStep2VariableAnswer } from './training/step2VariableGrading'
 import {
   getMathCardsArray,
   getMathCardsByProblem,
@@ -73,13 +74,22 @@ import {
   loadMathCardsCsvRows,
   loadTrainingCsvRows,
 } from './utils/dataLoader'
+import { applyTrainingMathVirtualKeyboard } from './training/trainingMathVirtualKeyboard'
 import ScratchPadModal from './components/ScratchPadModal'
 import StepFocusedLearningModal from './components/StepFocusedLearningModal'
+import EquationScaffoldingModal from './components/EquationScaffoldingModal'
+import {
+  buildFailedStepDetailsFromCompletedSteps,
+  generateStudentFeedback,
+  getStudentFeedbackDisplayText,
+} from './training/studentAiFeedback'
 import { collectStepTrainingConceptBundles } from './training/stepTrainingContent'
-import { generateStudentFeedback, getStudentFeedbackDisplayText } from './training/studentAiFeedback'
+import {
+  getScaffoldingStepsForRow,
+} from './training/scaffoldingTestData'
 
-const DEFAULT_CSV_PATH = '/data/training_problems_with_similar_v2.csv'
-const DEFAULT_HINTS_CSV_PATH = '/data/hints_structured.csv'
+const DEFAULT_CSV_PATH = '/data/training_problems_question_final_0810.csv'
+const DEFAULT_HINTS_CSV_PATH = '/data/hints_structured_step1-6_final_0810.csv'
 
 /** 키워드 카드 `duration-300` 뒤집기 후 문제 코드 면을 보여 주는 시간(ms), 이후 수련 본문으로 전환 */
 const KEYWORD_CARD_FLIP_ANIM_MS = 300
@@ -92,6 +102,17 @@ function emptyStepFlags() {
 
 function emptyStepCounts() {
   return Array(TRAINING_STAGE_COUNT).fill(0)
+}
+
+/** 2단계(stepIdx===1)만 x 정하기 전용 채점, 3~6단계는 기존 경로 유지 */
+function gradeTrainingTextAnswer(student, expected, { stepIdx, allowSwappedEquationSides, allowUnorderedPair }) {
+  if (stepIdx === 1) {
+    return matchesStep2VariableAnswer(student, expected)
+  }
+  return matchesScaffoldExpected(student, expected, {
+    allowSwappedEquationSides,
+    allowUnorderedPair,
+  })
 }
 
 /** 결과 화면 고정 — 저장 후 trainingPlan 갱신으로 problemIdx가 바뀌어도 방금 푼 문항 유지 */
@@ -497,6 +518,7 @@ export default function TrainingMode({
   const [isSaved, setIsSaved] = useState(false)
   const [activeBlankKey, setActiveBlankKey] = useState('')
   const [isMathLiveReady, setIsMathLiveReady] = useState(false)
+  const [isMathVkOpen, setIsMathVkOpen] = useState(false)
   const [isScratchPadOpen, setIsScratchPadOpen] = useState(false)
   const [isStepFocusedLearningOpen, setIsStepFocusedLearningOpen] = useState(false)
   const [trainingAllComplete, setTrainingAllComplete] = useState(false)
@@ -577,12 +599,23 @@ export default function TrainingMode({
   const [flippingProblemCode, setFlippingProblemCode] = useState(null)
   /** 유사1·유사2 진입 전 재도전/마지막 도전 확인 팝업 */
   const [retryChallengeDialog, setRetryChallengeDialog] = useState(null)
+  /** 옥동자 5단계 1회 오답 — 다시 도전 / 스캐폴딩 선택 */
+  const [scaffoldingChoiceDialog, setScaffoldingChoiceDialog] = useState(null)
+  /** 방정식 풀이 스캐폴딩 세션 (stepIndex는 0부터, isFinished는 마지막 완료) */
+  const [scaffoldingSession, setScaffoldingSession] = useState(null)
+  /** 스캐폴딩 오답 → 개념학습 Modal용 concept_key */
+  const [scaffoldingConceptKey, setScaffoldingConceptKey] = useState(null)
   const keywordFlipTimerRef = useRef(null)
   const blankLogTimer = useRef(null)
   const textInputRef = useRef(null)
   const mathFieldHostRef = useRef(null)
   const mathFieldRef = useRef(null)
   const stepHistoryScrollRef = useRef(null)
+  const activeStepPanelRef = useRef(null)
+  const answerScrollAnchorRef = useRef(null)
+  const answerScrollGuardActiveRef = useRef(false)
+  const suspendScrollAnchorForVkRef = useRef(false)
+  const userStepScrollRef = useRef(false)
   const blankInputRefs = useRef({})
   const startedProblemKeySetRef = useRef(new Set())
   const stepWrongCountsRef = useRef(emptyStepCounts())
@@ -1057,6 +1090,15 @@ export default function TrainingMode({
     isLastActiveTrainingStageIndex(row, stepIdx) &&
     completedSteps.length >= activeStepCount
 
+  const showTrainingProblemBody = trainingSessionActive || isResultView
+  /** 풀이 중: 문제 상단 고정 + 단계만 스크롤 / 결과 화면: 전체 세로 스크롤 */
+  const useFixedTrainingLayout = showTrainingProblemBody && !isResultView
+
+  const isLastActiveStep = useMemo(
+    () => Boolean(row && isLastActiveTrainingStageIndex(row, stepIdx)),
+    [row, stepIdx]
+  )
+
   const currentStage = getTrainingStage(stepIdx)
   const isChoiceStep = Boolean(currentStage?.isChoice)
   const questionText = row && currentStage ? getStageQuestionText(row, currentStage) : ''
@@ -1076,31 +1118,449 @@ export default function TrainingMode({
     [row, stepIdx, hintsData]
   )
 
-  const showStepFocusedLearningButton = useMemo(
-    () => Boolean(row && shouldShowStepFocusedLearningButton(row, stepIdx)),
-    [row, stepIdx],
+  const showStepFocusedLearningButton = false
+
+  const diagnosticTier = useMemo(
+    () =>
+      resolveCanonicalDiagnosticTier(
+        trainingPlan?.diagnosticTier ||
+          trainingPlan?.diagnosticRecord?.level ||
+          trainingPlan?.characterName ||
+          '하',
+      ),
+    [trainingPlan],
   )
+  const isOkdongjaTier = diagnosticTier === '하'
 
   const stepFocusedConceptBundles = useMemo(() => {
-    if (!row || !currentStage?.trainingKeyCol) return []
-    return collectStepTrainingConceptBundles(getStageTrainingKey(row, currentStage))
-  }, [row, currentStage])
+    if (!scaffoldingConceptKey) return []
+    return collectStepTrainingConceptBundles(scaffoldingConceptKey)
+  }, [scaffoldingConceptKey])
+
+  const closeScaffoldingSession = useCallback(() => {
+    setScaffoldingSession(null)
+    setScaffoldingChoiceDialog(null)
+    setScaffoldingConceptKey(null)
+    setIsStepFocusedLearningOpen(false)
+  }, [])
+
+  const startScaffoldingSession = useCallback(() => {
+    if (!row) return
+    const steps = getScaffoldingStepsForRow(row)
+    if (!steps.length) return
+    setScaffoldingChoiceDialog(null)
+    setScaffoldingConceptKey(null)
+    setIsStepFocusedLearningOpen(false)
+    setScaffoldingSession({
+      steps,
+      stepIndex: 0,
+      showRemember: false,
+      wrongPickCount: 0,
+      isFinished: false,
+    })
+  }, [row])
 
   useEffect(() => {
     setIsStepFocusedLearningOpen(false)
+    setScaffoldingConceptKey(null)
+    setScaffoldingSession(null)
+    setScaffoldingChoiceDialog(null)
   }, [stepIdx, problemIdx])
 
-  useEffect(() => {
-    const el = stepHistoryScrollRef.current
-    if (!el) return
-    el.scrollTop = el.scrollHeight
-  }, [completedSteps.length, stepIdx])
+  const resetOuterScrollPosition = useCallback(() => {
+    const mainEl = document.querySelector('main')
+    if (mainEl && mainEl.scrollTop !== 0) mainEl.scrollTop = 0
+    if (window.scrollY !== 0) window.scrollTo(0, 0)
+  }, [])
 
-  /** 정답이 x=숫자(예: x=4)이면 x= 접두·숫자만 입력 — 5-3 또는 5-1·5-2 skip 후 통합 단계 */
+  const clearAnswerScrollGuard = useCallback(() => {
+    answerScrollGuardActiveRef.current = false
+    answerScrollAnchorRef.current = null
+    userStepScrollRef.current = false
+  }, [])
+
+  const scrollToCurrentStepPanel = useCallback(() => {
+    resetOuterScrollPosition()
+    const scrollEl = stepHistoryScrollRef.current
+
+    const apply = () => {
+      resetOuterScrollPosition()
+      if (!scrollEl) return
+
+      if (isLastActiveStep) {
+        scrollEl.scrollTop = scrollEl.scrollHeight
+        return
+      }
+
+      const panelEl = activeStepPanelRef.current
+      if (!panelEl) {
+        scrollEl.scrollTop = scrollEl.scrollHeight
+        return
+      }
+
+      const containerRect = scrollEl.getBoundingClientRect()
+      const panelRect = panelEl.getBoundingClientRect()
+      if (panelRect.bottom > containerRect.bottom + 1) {
+        scrollEl.scrollTop += panelRect.bottom - containerRect.bottom
+      } else if (panelRect.top < containerRect.top - 1) {
+        scrollEl.scrollTop -= containerRect.top - panelRect.top
+      } else if (panelRect.bottom <= containerRect.top) {
+        scrollEl.scrollTop = scrollEl.scrollHeight
+      }
+    }
+
+    apply()
+    window.requestAnimationFrame(() => {
+      apply()
+      window.requestAnimationFrame(apply)
+    })
+  }, [resetOuterScrollPosition, isLastActiveStep])
+
+  useEffect(() => {
+    clearAnswerScrollGuard()
+    scrollToCurrentStepPanel()
+  }, [stepIdx, completedSteps.length, clearAnswerScrollGuard, scrollToCurrentStepPanel])
+
+  const captureAnswerScrollAnchor = useCallback(() => {
+    const scrollEl = stepHistoryScrollRef.current
+    answerScrollAnchorRef.current = {
+      scrollTop: scrollEl?.scrollTop ?? 0,
+    }
+  }, [])
+
+  const restoreAnswerScrollAnchor = useCallback(() => {
+    resetOuterScrollPosition()
+    if (isLastActiveStep || suspendScrollAnchorForVkRef.current) return
+    const anchor = answerScrollAnchorRef.current
+    if (!anchor || !answerScrollGuardActiveRef.current) return
+    const scrollEl = stepHistoryScrollRef.current
+    if (scrollEl && Math.abs(scrollEl.scrollTop - anchor.scrollTop) > 1) {
+      scrollEl.scrollTop = anchor.scrollTop
+    }
+  }, [resetOuterScrollPosition, isLastActiveStep])
+
+  const scrollPanelAboveMathKeyboard = useCallback(() => {
+    if (isLastActiveStep || !useFixedTrainingLayout) return
+    resetOuterScrollPosition()
+    const scrollEl = stepHistoryScrollRef.current
+    const panelEl = activeStepPanelRef.current
+    if (!scrollEl || !panelEl) return
+
+    const vk = window.mathVirtualKeyboard
+    let visibleBottom = window.innerHeight
+    if (vk?.visible && vk.boundingRect?.top > 0) {
+      visibleBottom = vk.boundingRect.top - 8
+    } else if (window.visualViewport) {
+      visibleBottom = window.visualViewport.offsetTop + window.visualViewport.height - 8
+    }
+
+    const panelRect = panelEl.getBoundingClientRect()
+    if (panelRect.bottom > visibleBottom) {
+      scrollEl.scrollTop += panelRect.bottom - visibleBottom
+    }
+    if (panelRect.top < 8) {
+      scrollEl.scrollTop += panelRect.top - 8
+    }
+  }, [isLastActiveStep, useFixedTrainingLayout, resetOuterScrollPosition])
+
+  const handleCloseMathVirtualKeyboard = useCallback(() => {
+    if (typeof window.mathVirtualKeyboard?.hide === 'function') {
+      window.mathVirtualKeyboard.hide()
+    }
+  }, [])
+
+  const beginAnswerScrollGuard = useCallback(() => {
+    resetOuterScrollPosition()
+    if (isLastActiveStep) {
+      answerScrollGuardActiveRef.current = true
+      window.requestAnimationFrame(resetOuterScrollPosition)
+      window.requestAnimationFrame(() => window.requestAnimationFrame(resetOuterScrollPosition))
+      return
+    }
+    if (suspendScrollAnchorForVkRef.current) {
+      scrollPanelAboveMathKeyboard()
+      return
+    }
+    captureAnswerScrollAnchor()
+    answerScrollGuardActiveRef.current = true
+    restoreAnswerScrollAnchor()
+    window.requestAnimationFrame(restoreAnswerScrollAnchor)
+    window.requestAnimationFrame(() => window.requestAnimationFrame(restoreAnswerScrollAnchor))
+  }, [
+    captureAnswerScrollAnchor,
+    restoreAnswerScrollAnchor,
+    resetOuterScrollPosition,
+    scrollPanelAboveMathKeyboard,
+    isLastActiveStep,
+  ])
+
+  const endAnswerScrollGuard = useCallback(() => {
+    if (!isLastActiveStep) return
+    answerScrollGuardActiveRef.current = false
+    answerScrollAnchorRef.current = null
+  }, [isLastActiveStep])
+
+  const handleAnswerFieldInput = useCallback(() => {
+    resetOuterScrollPosition()
+    if (isLastActiveStep) {
+      window.requestAnimationFrame(resetOuterScrollPosition)
+      return
+    }
+    if (suspendScrollAnchorForVkRef.current) {
+      scrollPanelAboveMathKeyboard()
+      window.requestAnimationFrame(scrollPanelAboveMathKeyboard)
+      return
+    }
+    if (userStepScrollRef.current) {
+      captureAnswerScrollAnchor()
+      userStepScrollRef.current = false
+      return
+    }
+    restoreAnswerScrollAnchor()
+    window.requestAnimationFrame(restoreAnswerScrollAnchor)
+  }, [
+    captureAnswerScrollAnchor,
+    restoreAnswerScrollAnchor,
+    resetOuterScrollPosition,
+    scrollPanelAboveMathKeyboard,
+    isLastActiveStep,
+  ])
+
+  /** 마지막 단계(입력칸 하단 고정): 클릭 시 바깥 스크롤만 방지 */
+  const handleLastStepAnswerMouseDown = useCallback(
+    (event) => {
+      if (!isLastActiveStep) return
+      if (event.target.closest('button') && !event.target.closest('math-field')) return
+      if (
+        !event.target.closest('input') &&
+        !event.target.closest('math-field') &&
+        !event.target.closest('.training-math-field-host')
+      ) {
+        return
+      }
+      event.preventDefault()
+      answerScrollGuardActiveRef.current = true
+      const focusTarget =
+        event.target.closest('input') ??
+        event.target.closest('math-field') ??
+        textInputRef.current ??
+        mathFieldRef.current
+      if (typeof focusTarget?.focus === 'function') {
+        focusTarget.focus({ preventScroll: true })
+      }
+      resetOuterScrollPosition()
+      window.requestAnimationFrame(resetOuterScrollPosition)
+      window.requestAnimationFrame(() => window.requestAnimationFrame(resetOuterScrollPosition))
+    },
+    [isLastActiveStep, resetOuterScrollPosition],
+  )
+
+  /** 풀이 중: 바깥(main) 스크롤 잠금 — 단계 영역만 스크롤 */
+  useEffect(() => {
+    const mainEl = document.querySelector('main')
+    if (!mainEl) return undefined
+    if (useFixedTrainingLayout) {
+      mainEl.classList.add('training-solving-main-lock')
+      resetOuterScrollPosition()
+    } else {
+      mainEl.classList.remove('training-solving-main-lock')
+    }
+    return () => {
+      mainEl.classList.remove('training-solving-main-lock')
+    }
+  }, [useFixedTrainingLayout, resetOuterScrollPosition])
+
+  useEffect(() => {
+    if (!useFixedTrainingLayout) return undefined
+    resetOuterScrollPosition()
+    const mainEl = document.querySelector('main')
+    const onOuterScroll = () => resetOuterScrollPosition()
+    mainEl?.addEventListener('scroll', onOuterScroll, { passive: true })
+    window.addEventListener('scroll', onOuterScroll, { passive: true })
+    return () => {
+      mainEl?.removeEventListener('scroll', onOuterScroll)
+      window.removeEventListener('scroll', onOuterScroll)
+    }
+  }, [useFixedTrainingLayout, stepIdx, resetOuterScrollPosition])
+
+  useEffect(() => {
+    if (!useFixedTrainingLayout) return undefined
+    const scrollEl = stepHistoryScrollRef.current
+    const markUserStepScroll = () => {
+      userStepScrollRef.current = true
+      if (answerScrollGuardActiveRef.current) {
+        captureAnswerScrollAnchor()
+      }
+    }
+    scrollEl?.addEventListener('wheel', markUserStepScroll, { passive: true })
+    scrollEl?.addEventListener('touchmove', markUserStepScroll, { passive: true })
+    const vv = window.visualViewport
+    const onViewportChange = () => {
+      resetOuterScrollPosition()
+      if (suspendScrollAnchorForVkRef.current) {
+        scrollPanelAboveMathKeyboard()
+        return
+      }
+      if (answerScrollGuardActiveRef.current) {
+        restoreAnswerScrollAnchor()
+      }
+    }
+    vv?.addEventListener('resize', onViewportChange)
+    vv?.addEventListener('scroll', onViewportChange)
+    return () => {
+      scrollEl?.removeEventListener('wheel', markUserStepScroll)
+      scrollEl?.removeEventListener('touchmove', markUserStepScroll)
+      vv?.removeEventListener('resize', onViewportChange)
+      vv?.removeEventListener('scroll', onViewportChange)
+    }
+  }, [
+    useFixedTrainingLayout,
+    stepIdx,
+    completedSteps.length,
+    captureAnswerScrollAnchor,
+    restoreAnswerScrollAnchor,
+    resetOuterScrollPosition,
+    scrollPanelAboveMathKeyboard,
+  ])
+
+  /** 정답이 x=숫자(예: x=4)이면 x= 접두·숫자만 입력 (5단계) */
   const isNumericXValueStep = useMemo(
     () => isXValueNumericAnswer(expectedAnswer),
     [expectedAnswer]
   )
+
+  const isStep5EquationSolve = useMemo(
+    () =>
+      Boolean(
+        row &&
+          isSecondToLastActiveTrainingStageIndex(row, stepIdx) &&
+          isNumericXValueStep,
+      ),
+    [row, stepIdx, isNumericXValueStep],
+  )
+
+  const scaffoldingStepsForProblem = useMemo(
+    () => (row ? getScaffoldingStepsForRow(row) : []),
+    [row],
+  )
+
+  const hasScaffoldingForCurrentProblem = scaffoldingStepsForProblem.length > 0
+
+  const shouldOfferScaffoldingOnStep5 =
+    isOkdongjaTier && isStep5EquationSolve && hasScaffoldingForCurrentProblem
+
+  const handleStep5WrongAfterAttempt = useCallback(
+    (streak) => {
+      if (!shouldOfferScaffoldingOnStep5) return false
+      if (streak === 1) {
+        setScaffoldingChoiceDialog({ streak })
+        return true
+      }
+      if (streak === 2) {
+        startScaffoldingSession()
+        return true
+      }
+      return false
+    },
+    [shouldOfferScaffoldingOnStep5, startScaffoldingSession],
+  )
+
+  const handleScaffoldingChoiceSelect = useCallback((choiceIndex) => {
+    setScaffoldingSession((prev) => {
+      if (!prev || prev.isFinished) return prev
+      const step = prev.steps[prev.stepIndex]
+      if (!step) return prev
+      if (choiceIndex === step.correctChoice) {
+        const nextIndex = prev.stepIndex + 1
+        if (nextIndex >= prev.steps.length) {
+          return {
+            ...prev,
+            stepIndex: nextIndex,
+            showRemember: false,
+            wrongPickCount: 0,
+            isFinished: true,
+          }
+        }
+        return { ...prev, stepIndex: nextIndex, showRemember: false, wrongPickCount: 0 }
+      }
+      return {
+        ...prev,
+        showRemember: true,
+        wrongPickCount: (prev.wrongPickCount ?? 0) + 1,
+      }
+    })
+  }, [])
+
+  const handleScaffoldingLearnConcept = useCallback((conceptKey) => {
+    const key = String(conceptKey ?? '').trim()
+    if (!key) return
+    setScaffoldingConceptKey(key)
+    setIsStepFocusedLearningOpen(true)
+  }, [])
+
+  const activeScaffoldStep =
+    scaffoldingSession && !scaffoldingSession.isFinished
+      ? scaffoldingSession.steps[scaffoldingSession.stepIndex] ?? null
+      : null
+
+  /** 마지막·그 전 단계(숫자만 x= 등)는 가상 키보드 비표시 — 스크롤 튐 방지 */
+  const disableMathVirtualKeyboard = useMemo(() => {
+    if (!row || isNumericXValueStep) return true
+    return (
+      isLastActiveTrainingStageIndex(row, stepIdx) ||
+      isSecondToLastActiveTrainingStageIndex(row, stepIdx)
+    )
+  }, [row, stepIdx, isNumericXValueStep])
+
+  useEffect(() => {
+    if (!isMathLiveReady || disableMathVirtualKeyboard) {
+      setIsMathVkOpen(false)
+      suspendScrollAnchorForVkRef.current = false
+      return undefined
+    }
+    const vk = window.mathVirtualKeyboard
+    if (!vk?.addEventListener) return undefined
+
+    const syncVkOpenState = (open) => {
+      setIsMathVkOpen(open)
+      suspendScrollAnchorForVkRef.current = open
+    }
+
+    const onVkToggle = () => {
+      const open = Boolean(vk.visible)
+      syncVkOpenState(open)
+      if (open) {
+        scrollPanelAboveMathKeyboard()
+        window.requestAnimationFrame(() => {
+          scrollPanelAboveMathKeyboard()
+          window.requestAnimationFrame(scrollPanelAboveMathKeyboard)
+        })
+      }
+    }
+
+    const onVkGeometry = () => {
+      if (vk.visible) scrollPanelAboveMathKeyboard()
+    }
+
+    vk.addEventListener('virtual-keyboard-toggle', onVkToggle)
+    vk.addEventListener('geometrychange', onVkGeometry)
+    syncVkOpenState(Boolean(vk.visible))
+
+    return () => {
+      vk.removeEventListener('virtual-keyboard-toggle', onVkToggle)
+      vk.removeEventListener('geometrychange', onVkGeometry)
+      suspendScrollAnchorForVkRef.current = false
+    }
+  }, [
+    isMathLiveReady,
+    disableMathVirtualKeyboard,
+    scrollPanelAboveMathKeyboard,
+    stepIdx,
+    problemIdx,
+  ])
+
+  /** 마지막 단계·x=숫자 단계는 일반 텍스트 입력(수식 패드 없음) */
+  const usePlainTextAnswerInput = isNumericXValueStep || isLastActiveStep
 
   const readMathFieldPlainAnswer = () => {
     const mf = mathFieldRef.current
@@ -1134,7 +1594,8 @@ export default function TrainingMode({
     const rowStage = Number(row.__poolStage ?? row['학습단계'] ?? row['단계'])
     const allowUnorderedPairAtStep3 =
       stepIdx === 2 && rowStage === 5 && (rowType === 'A' || rowType === 'C')
-    return matchesScaffoldExpected(gradedTextAnswer, expectedAnswer, {
+    return gradeTrainingTextAnswer(gradedTextAnswer, expectedAnswer, {
+      stepIdx,
       allowSwappedEquationSides: true,
       allowUnorderedPair: allowUnorderedPairAtStep3,
     })
@@ -1181,8 +1642,12 @@ export default function TrainingMode({
   }, [stepIdx, problemIdx])
 
   const stepLabel = useMemo(() => getTrainingStageDisplayLabel(stepIdx), [stepIdx])
-  const isDiagnosticStyleMathStep = stepIdx === 2
-  const mathPadTokens = ['=', '+', '-', '×', '/', '(', ')', '{', '}']
+
+  const renderStepInputHint = () => {
+    if (isChoiceStep) return null
+    if (answerCheckState !== '' || canAdvance) return null
+    return <span className="text-xs font-medium text-slate-500">입력 후 다음 단계로</span>
+  }
 
   const renderTextWithFractions = (text, keyPrefix = 'frac') => {
     const raw = preprocessFractionDisplayText(String(text || ''))
@@ -1218,6 +1683,37 @@ export default function TrainingMode({
     return nodes
   }
 
+  /** 결과 화면 정답 표시 — 줄바꿈·쉼표 구분 복수 정답을 한 줄(필요 시 wrap)로 */
+  const splitDisplayAnswerParts = (text) => {
+    const raw = String(text || '').trim()
+    if (!raw) return []
+    if (/\n/.test(raw)) {
+      const lines = raw.split(/\n+/).map((line) => line.trim()).filter(Boolean)
+      if (lines.length >= 2) return lines
+    }
+    if (/,/.test(raw) && !raw.includes('=')) {
+      const parts = raw.split(/\s*,\s*/).map((part) => part.trim()).filter(Boolean)
+      if (parts.length >= 2) return parts
+    }
+    return [raw]
+  }
+
+  const renderHistoryCorrectAnswer = (text, keyPrefix = 'history-correct') => {
+    const parts = splitDisplayAnswerParts(text)
+    if (parts.length <= 1) {
+      return renderTextWithFractions(text, keyPrefix)
+    }
+    return (
+      <span className="flex flex-wrap items-center gap-x-4 gap-y-1">
+        {parts.map((part, index) => (
+          <span key={`${keyPrefix}-part-${index}`} className="inline-flex items-center">
+            {renderTextWithFractions(part, `${keyPrefix}-${index}`)}
+          </span>
+        ))}
+      </span>
+    )
+  }
+
   const syncMathFieldToTextAnswer = () => {
     const plain = readMathFieldPlainAnswer()
     if (!plain && !mathFieldRef.current) return
@@ -1245,7 +1741,7 @@ export default function TrainingMode({
     syncMathFieldToTextAnswer()
   }
 
-  const attachMathFieldInputHelpers = (mf) => {
+  const attachMathFieldInputHelpers = (mf, { disableVirtualKeyboard = false } = {}) => {
     if (!mf) return () => {}
 
     const onKeyDown = (event) => {
@@ -1276,27 +1772,47 @@ export default function TrainingMode({
 
     const onInput = () => {
       syncMathFieldToTextAnswer()
+      handleAnswerFieldInput()
     }
 
     const onFocus = () => {
-      const scrollY = window.scrollY
-      window.requestAnimationFrame(() => {
-        if (window.scrollY !== scrollY) {
-          window.scrollTo(0, scrollY)
-        }
-      })
+      if (!disableVirtualKeyboard) {
+        applyTrainingMathVirtualKeyboard()
+      }
+      beginAnswerScrollGuard()
+      resetOuterScrollPosition()
+      if (
+        disableVirtualKeyboard &&
+        typeof window.mathVirtualKeyboard?.hide === 'function'
+      ) {
+        window.mathVirtualKeyboard.hide()
+      }
+    }
+
+    const onFocusIn = () => {
+      if (!disableVirtualKeyboard) {
+        applyTrainingMathVirtualKeyboard()
+      }
+    }
+
+    const onBlur = () => {
+      endAnswerScrollGuard()
     }
 
     mf.addEventListener('keydown', onKeyDown)
     mf.addEventListener('beforeinput', onBeforeInput)
     mf.addEventListener('input', onInput)
+    mf.addEventListener('focusin', onFocusIn)
     mf.addEventListener('focus', onFocus)
+    mf.addEventListener('blur', onBlur)
 
     return () => {
       mf.removeEventListener('keydown', onKeyDown)
       mf.removeEventListener('beforeinput', onBeforeInput)
       mf.removeEventListener('input', onInput)
+      mf.removeEventListener('focusin', onFocusIn)
       mf.removeEventListener('focus', onFocus)
+      mf.removeEventListener('blur', onBlur)
     }
   }
 
@@ -1307,7 +1823,10 @@ export default function TrainingMode({
         if (!window.customElements?.get('math-field')) {
           await import('mathlive')
         }
-        if (!cancelled) setIsMathLiveReady(true)
+        if (!cancelled) {
+          setIsMathLiveReady(true)
+          applyTrainingMathVirtualKeyboard()
+        }
       } catch (error) {
         console.error('[TrainingMode] mathlive load failed', error)
         if (!cancelled) setLoadError('수식 입력기를 불러오지 못했습니다.')
@@ -1319,94 +1838,78 @@ export default function TrainingMode({
   }, [])
 
   useEffect(() => {
-    if (isNumericXValueStep) return undefined
+    if (usePlainTextAnswerInput) return undefined
     const host = mathFieldHostRef.current
     if (!host || !isMathLiveReady) return undefined
     host.innerHTML = ''
     const mf = document.createElement('math-field')
+    mf.setAttribute(
+      'math-virtual-keyboard-policy',
+      disableMathVirtualKeyboard ? 'manual' : 'auto'
+    )
     mf.setAttribute(
       'style',
       'min-height:38px;width:100%;border:1px solid rgb(252 211 77);border-radius:0.75rem;padding:0.3rem 0.65rem;background-color:white;font-size:0.9375rem;'
     )
     host.appendChild(mf)
     mathFieldRef.current = mf
-    const detachHelpers = attachMathFieldInputHelpers(mf)
+    let hideMenu = () => {}
+    if (disableMathVirtualKeyboard) {
+      hideMenu = () => {
+        try {
+          mf.menuItems = []
+        } catch {
+          /* ignore */
+        }
+      }
+      hideMenu()
+      mf.addEventListener?.('mount', hideMenu)
+    }
+    const detachHelpers = attachMathFieldInputHelpers(mf, {
+      disableVirtualKeyboard: disableMathVirtualKeyboard,
+    })
     return () => {
       detachHelpers()
+      mf.removeEventListener?.('mount', hideMenu)
       if (host.contains(mf)) host.removeChild(mf)
       mathFieldRef.current = null
     }
-  }, [problemIdx, stepIdx, isMathLiveReady, isNumericXValueStep])
-
-  const insertMathToken = (token) => {
-    if (isStepJudged) return
-    const mf = mathFieldRef.current
-    if (mf) {
-      if (token === '/') {
-        insertFractionTemplate(mf)
-      } else if (typeof mf.executeCommand === 'function') {
-        mf.executeCommand(['insert', token === '×' ? '\\times' : token])
-      } else if (typeof mf.insert === 'function') {
-        mf.insert(token === '×' ? '\\times' : token)
-      }
-      syncMathFieldToTextAnswer()
-      if (typeof mf.focus === 'function') mf.focus()
-      return
-    }
-
-    const inputEl = textInputRef.current
-    if (!inputEl) {
-      setTextAnswer((prev) => `${prev}${token}`)
-      setAnswerCheckState('')
-      return
-    }
-    const start = inputEl.selectionStart ?? textAnswer.length
-    const end = inputEl.selectionEnd ?? textAnswer.length
-    const nextValue = `${textAnswer.slice(0, start)}${token}${textAnswer.slice(end)}`
-    setTextAnswer(nextValue)
-    setAnswerCheckState('')
-    window.requestAnimationFrame(() => {
-      inputEl.focus()
-      const cursor = start + token.length
-      inputEl.setSelectionRange(cursor, cursor)
-    })
-  }
+  }, [problemIdx, stepIdx, isMathLiveReady, usePlainTextAnswerInput, disableMathVirtualKeyboard])
 
   const renderMathPad = (withXPrefix = false, options = {}) => {
     const { hideMathField = false } = options
     return (
-    <div className="space-y-1.5">
-      {!hideMathField && (
-        <div className="flex items-stretch gap-2">
-          {withXPrefix && (
-            <span className="inline-flex items-center rounded-xl border border-yellow-300 bg-yellow-50 px-2.5 py-1.5 text-sm font-black text-slate-800">
-              x=
-            </span>
-          )}
-          {isMathLiveReady ? (
-            <div ref={mathFieldHostRef} className="training-math-field-host flex-1" />
-          ) : (
-            <div className="flex min-h-[38px] flex-1 items-center rounded-xl border border-yellow-300 bg-white px-2.5 py-1.5 text-xs text-slate-500">
-              수식 입력기를 준비하는 중...
-            </div>
-          )}
-        </div>
-      )}
-      <div className="flex flex-wrap gap-1.5">
-        {mathPadTokens.map((token) => (
+      <div className="space-y-1.5">
+        {!hideMathField && (
+          <div className="flex items-stretch gap-2">
+            {withXPrefix && (
+              <span className="inline-flex items-center rounded-xl border border-yellow-300 bg-yellow-50 px-2.5 py-1.5 text-sm font-black text-slate-800">
+                x=
+              </span>
+            )}
+            {isMathLiveReady ? (
+              <div
+                ref={mathFieldHostRef}
+                className={`training-math-field-host flex-1${disableMathVirtualKeyboard ? ' training-math-field-host--no-vk' : ''}`}
+              />
+            ) : (
+              <div className="flex min-h-[38px] flex-1 items-center rounded-xl border border-yellow-300 bg-white px-2.5 py-1.5 text-xs text-slate-500">
+                수식 입력기를 준비하는 중...
+              </div>
+            )}
+          </div>
+        )}
+        {isMathVkOpen && !disableMathVirtualKeyboard ? (
           <button
-            key={token}
             type="button"
-            onClick={() => insertMathToken(token)}
-            disabled={isStepJudged}
-            className="rounded-lg border border-blue-300 bg-blue-50 px-2.5 py-1.5 text-xs font-bold text-blue-800 transition hover:bg-blue-100 sm:text-sm"
+            onClick={handleCloseMathVirtualKeyboard}
+            className="rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-xs font-bold text-slate-700 transition hover:bg-slate-50 sm:text-sm"
           >
-            {token}
+            키보드 닫기
           </button>
-        ))}
+        ) : null}
       </div>
-    </div>
-  )
+    )
   }
 
   const applyWrongAttempt = () => {
@@ -1424,8 +1927,11 @@ export default function TrainingMode({
 
   const tryAutoRevealAfterWrong = (nextWrongStreak, studentAnswerBeforeReveal) => {
     const usedHintAtCurrentStep = Boolean(hintFlags[stepIdx])
-    const reachedAutoRevealCondition =
-      (usedHintAtCurrentStep && nextWrongStreak >= 2) || (!usedHintAtCurrentStep && nextWrongStreak >= 3)
+    const isStep5 = Boolean(row && isSecondToLastActiveTrainingStageIndex(row, stepIdx))
+    const reachedAutoRevealCondition = isStep5
+      ? nextWrongStreak >= 3
+      : (usedHintAtCurrentStep && nextWrongStreak >= 2) ||
+        (!usedHintAtCurrentStep && nextWrongStreak >= 3)
     if (!reachedAutoRevealCondition) return false
     const revealedAnswer = (expectedAnswer || '').trim()
     revealedStudentAnswerByStepRef.current[stepIdx] = studentAnswerBeforeReveal
@@ -1485,16 +1991,22 @@ export default function TrainingMode({
     )
   }
 
-  const renderQuestionBody = () => {
+  const renderQuestionBody = ({ compact = false } = {}) => {
     if (!row) return null
     if (isChoiceStep) {
       const { prompt, options } = choiceOptionsParsed
       return (
-        <div className="space-y-4">
-          <p className="whitespace-pre-wrap text-base leading-[1.8] text-slate-800 sm:text-lg sm:leading-[1.85]">
+        <div className={compact ? 'space-y-2' : 'space-y-4'}>
+          <p
+            className={
+              compact
+                ? 'line-clamp-3 text-sm leading-snug text-slate-800'
+                : 'whitespace-pre-wrap text-base leading-[1.8] text-slate-800 sm:text-lg sm:leading-[1.85]'
+            }
+          >
             {renderTextWithFractions(prompt || questionText, `choice-prompt-${problemIdx}`)}
           </p>
-          {renderStepFocusedLearningCta()}
+          {!compact ? renderStepFocusedLearningCta() : null}
           <div className="grid gap-2 sm:grid-cols-2">
             {options.map((opt) => (
               <button
@@ -1515,9 +2027,96 @@ export default function TrainingMode({
               </button>
             ))}
           </div>
+          {!compact && currentStepHintAvailable ? (
+            <div className="flex flex-wrap items-center gap-2 sm:gap-2.5">
+              <button
+                type="button"
+                onClick={handleHint}
+                disabled={isStepJudged}
+                className={softButtonClass}
+              >
+                힌트 보기
+              </button>
+            </div>
+          ) : null}
         </div>
       )
     }
+
+    const plainInputProps = {
+      ref: textInputRef,
+      type: 'text',
+      autoComplete: 'off',
+      disabled: isStepJudged,
+      value: textAnswer,
+      onFocus: () => {
+        beginAnswerScrollGuard()
+        resetOuterScrollPosition()
+      },
+      onBlur: endAnswerScrollGuard,
+    }
+
+    if (compact) {
+      return (
+        <div className="space-y-2">
+          <p className="line-clamp-3 text-sm leading-snug text-slate-800">
+            {renderTextWithFractions(questionText, `question-${problemIdx}-${stepIdx}`)}
+          </p>
+          <div className="flex items-stretch gap-2">
+            {isNumericXValueStep ? (
+              <span className="inline-flex shrink-0 items-center rounded-lg border border-yellow-300 bg-yellow-50 px-2 py-1.5 text-sm font-black text-slate-800">
+                x=
+              </span>
+            ) : null}
+            <input
+              {...plainInputProps}
+              inputMode={isNumericXValueStep ? 'decimal' : 'text'}
+              onChange={(event) => {
+                const raw = event.target.value
+                const next = isNumericXValueStep ? raw.replace(/[^0-9.\-]/g, '') : raw
+                setTextAnswer(next)
+                setAnswerCheckState('')
+                handleAnswerFieldInput()
+              }}
+              className="min-w-0 flex-1 rounded-lg border border-yellow-300 bg-white px-2.5 py-1.5 text-sm text-slate-900 outline-none focus:border-amber-400 focus:ring-2 focus:ring-amber-200"
+              placeholder={isNumericXValueStep ? '숫자만 입력' : '답 입력'}
+            />
+          </div>
+          <div className="flex flex-wrap items-center gap-2">
+            <button
+              type="button"
+              onClick={handleCheckAnswer}
+              disabled={isStepJudged}
+              className="shrink-0 rounded-lg border border-blue-400 bg-white px-3 py-1.5 text-sm font-bold text-blue-800 transition hover:bg-blue-50"
+            >
+              입력
+            </button>
+            {currentStepHintAvailable ? (
+              <button
+                type="button"
+                onClick={handleHint}
+                disabled={isStepJudged}
+                className="shrink-0 rounded-lg border border-violet-300 bg-violet-50 px-2.5 py-1.5 text-xs font-bold text-violet-800 transition hover:bg-violet-100 sm:text-sm"
+              >
+                힌트 보기
+              </button>
+            ) : null}
+            {renderStepInputHint()}
+          </div>
+          {answerCheckState === 'wrong' ? (
+            <p className="text-xs font-semibold text-rose-700">
+              {currentStepHintAvailable
+                ? '다시 생각해 보세요. 힌트를 써도 좋아요.'
+                : '다시 생각해 보세요.'}
+            </p>
+          ) : null}
+          {answerCheckState === 'correct' ? (
+            <p className="text-xs font-semibold text-emerald-700">정답입니다!</p>
+          ) : null}
+        </div>
+      )
+    }
+
     return (
       <div className="space-y-2.5">
         <p className="whitespace-pre-wrap text-base leading-[1.8] text-slate-800 sm:text-lg sm:leading-[1.85]">
@@ -1526,41 +2125,92 @@ export default function TrainingMode({
         {renderStepFocusedLearningCta()}
         <div className="mt-1 space-y-2">
         <label className="block text-sm font-black leading-normal text-violet-950">답 입력</label>
-        {isNumericXValueStep ? (
+        {usePlainTextAnswerInput ? (
           <div className="flex items-stretch gap-2">
-            <span className="inline-flex items-center rounded-xl border border-yellow-300 bg-yellow-50 px-2.5 py-1.5 text-sm font-black text-slate-800">
-              x=
-            </span>
+            {isNumericXValueStep ? (
+              <span className="inline-flex items-center rounded-xl border border-yellow-300 bg-yellow-50 px-2.5 py-1.5 text-sm font-black text-slate-800">
+                x=
+              </span>
+            ) : null}
             <input
-              ref={textInputRef}
-              type="text"
-              inputMode="decimal"
-              autoComplete="off"
-              disabled={isStepJudged}
-              value={textAnswer}
+              {...plainInputProps}
+              inputMode={isNumericXValueStep ? 'decimal' : 'text'}
               onChange={(event) => {
-                const next = event.target.value.replace(/[^0-9.\-]/g, '')
+                const raw = event.target.value
+                const next = isNumericXValueStep ? raw.replace(/[^0-9.\-]/g, '') : raw
                 setTextAnswer(next)
                 setAnswerCheckState('')
+                handleAnswerFieldInput()
               }}
               className="flex-1 rounded-xl border border-yellow-300 bg-white px-2.5 py-1.5 text-sm text-slate-900 outline-none focus:border-amber-400 focus:ring-2 focus:ring-amber-200"
-              placeholder="숫자만 입력"
+              placeholder={isNumericXValueStep ? '숫자만 입력' : '답 입력'}
             />
           </div>
         ) : (
           renderMathPad(false)
         )}
-        <div>
+        <div className="flex flex-wrap items-center gap-2 sm:gap-2.5">
           <button
             type="button"
             onClick={handleCheckAnswer}
             disabled={isStepJudged}
             className={submitAnswerButtonClass}
+            title="정답 입력 후 입력 버튼을 누르세요"
           >
             입력
           </button>
+          {currentStepHintAvailable ? (
+            <button
+              type="button"
+              onClick={handleHint}
+              disabled={isStepJudged}
+              className={softButtonClass}
+            >
+              힌트 보기
+            </button>
+          ) : null}
+          {renderStepInputHint()}
         </div>
         </div>
+      </div>
+    )
+  }
+
+  const renderActiveStepPanel = ({ pinned = false } = {}) => {
+    if (isAwaitingResultSave || isFinalStepLocked) return null
+    return (
+      <div
+        ref={activeStepPanelRef}
+        className={[
+          'training-step-input-panel mb-1 rounded-2xl border border-blue-200 bg-white p-3 sm:p-4',
+          pinned
+            ? 'training-step-input-panel--pinned training-step-input-panel--compact shrink-0'
+            : '',
+        ]
+          .filter(Boolean)
+          .join(' ')}
+        onMouseDown={pinned ? handleLastStepAnswerMouseDown : undefined}
+      >
+        <div className="flex flex-wrap items-center gap-1.5 sm:gap-2">
+          <span className="rounded-full bg-blue-600 px-3 py-1 text-xs font-bold text-white">
+            수련 {activeFlowPosition + 1} / {activeStepCount || 1}
+          </span>
+          <span className="text-sm font-extrabold text-slate-700 sm:text-base">{stepLabel}</span>
+        </div>
+        <div className={pinned ? 'mt-1.5' : 'mt-4'}>{renderQuestionBody({ compact: pinned })}</div>
+        {!pinned && answerCheckState === 'correct' && (
+          <p className="mt-3 text-sm font-semibold text-emerald-700">정답입니다!</p>
+        )}
+        {!pinned && answerCheckState === 'wrong' && (
+          <p className="mt-3 text-sm font-semibold text-rose-700">
+            {currentStepHintAvailable
+              ? '다시 한번 생각해보세요. 힌트를 사용해도 좋습니다'
+              : '다시 한번 생각해보세요.'}
+          </p>
+        )}
+        {!pinned && isChoiceStep && answerCheckState === '' && !canAdvance && (
+          <p className="mt-3 text-sm text-slate-500">선택지를 눌러 주세요.</p>
+        )}
       </div>
     )
   }
@@ -1576,7 +2226,8 @@ export default function TrainingMode({
             expectedChoiceToken,
           })
         : Boolean(answerForGrade) &&
-          matchesScaffoldExpected(answerForGrade, expectedAnswer, {
+          gradeTrainingTextAnswer(answerForGrade, expectedAnswer, {
+            stepIdx,
             allowSwappedEquationSides: true,
             allowUnorderedPair:
               stepIdx === 2 &&
@@ -1599,6 +2250,7 @@ export default function TrainingMode({
 
     const streak = applyWrongAttempt()
     const studentView = isChoiceStep ? selectedChoice : answerForGrade
+    if (handleStep5WrongAfterAttempt(streak)) return
     tryAutoRevealAfterWrong(streak, studentView)
   }
 
@@ -1734,7 +2386,8 @@ export default function TrainingMode({
           studentToken: submittedChoiceToken ?? selectedChoiceToken,
           expectedChoiceToken,
         })
-      : matchesScaffoldExpected(answerForView, expectedAnswer, {
+      : gradeTrainingTextAnswer(answerForView, expectedAnswer, {
+          stepIdx,
           allowSwappedEquationSides: true,
           allowUnorderedPair: allowUnorderedPairAtStep3,
         })
@@ -1839,6 +2492,10 @@ export default function TrainingMode({
         meaning: TRAINING_STEP_MEANINGS[i] || '',
         isCorrect: Number(item.processResult) > 0,
       })),
+      failedStepDetails: buildFailedStepDetailsFromCompletedSteps(
+        nextCompletedSteps,
+        TRAINING_STEP_MEANINGS,
+      ),
       total: successCount,
       fail_count: failCount,
       type: trainingType,
@@ -2044,8 +2701,9 @@ export default function TrainingMode({
       trainingPlan?.characterName ||
       '하'
   )
-  const characterName =
-    (trainingPlan?.characterName || '').trim() || getCharacterNameForTier(tierForAvatar)
+  const characterName = getCharacterDisplayName(
+    (trainingPlan?.characterName || '').trim() || tierForAvatar
+  )
   const currentStep = Math.min(Math.max(activeFlowPosition + 1, 1), activeStepCount || 1)
   console.log('[render] isResultView:', isResultView)
   console.log('[render] currentStep:', currentStep)
@@ -2148,9 +2806,6 @@ export default function TrainingMode({
     }
   }, [isResultView, resultDisplay, trainingAiFeedback])
 
-  const showTrainingProblemBody = trainingSessionActive || isResultView
-  /** 풀이 중: 문제 상단 고정 + 단계만 스크롤 / 결과 화면: 전체 세로 스크롤 */
-  const useFixedTrainingLayout = showTrainingProblemBody && !isResultView
   const keywordCardsEnabled =
     flippingProblemCode === null &&
     !retryChallengeDialog &&
@@ -2381,6 +3036,39 @@ export default function TrainingMode({
           </div>
         </div>
       ) : null}
+      {scaffoldingChoiceDialog ? (
+        <div
+          className="fixed inset-0 z-[108] flex items-center justify-center bg-slate-900/45 px-4 backdrop-blur-[1px]"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="scaffolding-choice-title"
+        >
+          <div className="w-full max-w-md rounded-3xl border border-indigo-200 bg-white p-6 shadow-2xl sm:p-7">
+            <p
+              id="scaffolding-choice-title"
+              className="text-center text-base font-bold leading-relaxed text-slate-800 sm:text-lg"
+            >
+              5단계에서 틀렸어요. 어떻게 할까요?
+            </p>
+            <div className="mt-6 flex flex-col gap-3">
+              <button
+                type="button"
+                onClick={() => setScaffoldingChoiceDialog(null)}
+                className="rounded-xl border border-slate-300 bg-white px-5 py-3 text-sm font-bold text-slate-700 transition hover:bg-slate-50"
+              >
+                다시 도전
+              </button>
+              <button
+                type="button"
+                onClick={startScaffoldingSession}
+                className="rounded-xl bg-gradient-to-r from-indigo-600 to-violet-600 px-5 py-3 text-sm font-bold text-white shadow-md transition hover:brightness-105"
+              >
+                보리도사와 함께 방정식 풀기
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
       <div
         className={
           useFixedTrainingLayout
@@ -2392,13 +3080,62 @@ export default function TrainingMode({
       >
       <section
         className={[
-          'rounded-3xl border border-blue-200/80 bg-white/90 p-4 shadow-2xl backdrop-blur-md sm:p-6 lg:p-8',
-          useFixedTrainingLayout ? 'flex min-h-0 flex-1 flex-col overflow-hidden' : '',
+          'rounded-3xl border border-blue-200/80 bg-white/90 shadow-2xl backdrop-blur-md',
+          useFixedTrainingLayout ? 'flex min-h-0 flex-1 flex-col overflow-hidden p-3 sm:p-4' : 'p-4 sm:p-6 lg:p-8',
           isResultView ? 'flex flex-col' : '',
         ]
           .filter(Boolean)
           .join(' ')}
       >
+      {useFixedTrainingLayout ? (
+        <div className="flex shrink-0 flex-wrap items-center gap-x-3 gap-y-2">
+          <div className="shrink-0 rounded-xl border border-blue-200 bg-blue-50 p-1">
+            <img
+              src={characterCardImage}
+              alt={`${characterName} 캐릭터 카드`}
+              className="h-[4.25rem] w-[4.25rem] rounded-lg border border-blue-200 object-cover sm:h-[4.75rem] sm:w-[4.75rem]"
+            />
+          </div>
+          <div className="flex h-[4.25rem] min-w-0 flex-1 flex-col justify-center gap-1 sm:h-[4.75rem] sm:gap-1.5">
+            <p className="truncate text-[11px] font-semibold leading-snug text-blue-700 sm:text-xs">
+              {headerKicker}
+            </p>
+            <h2 className="truncate text-base font-black leading-snug text-blue-950 sm:text-lg">
+              방정식의 활용 수련
+            </h2>
+            <p className="truncate text-[11px] font-semibold leading-snug text-slate-800 sm:text-xs">
+              <span>{resultDisplay.summary}</span>
+              <span className="text-slate-600">
+                {' '}
+                · 힌트 사용 {resultDisplay.hintUsageCount}회
+              </span>
+            </p>
+          </div>
+          <div className="ml-auto flex flex-wrap items-center gap-1.5 sm:gap-2">
+            <button
+              type="button"
+              onClick={onExit}
+              className="rounded-lg border border-slate-300 bg-white px-2.5 py-1.5 text-xs font-bold text-slate-700 transition hover:bg-slate-50 sm:px-3 sm:text-sm"
+            >
+              나가기
+            </button>
+            <button
+              type="button"
+              onClick={() => setIsMathCardCollectionOpen(true)}
+              className="rounded-lg border border-violet-300 bg-violet-50 px-2.5 py-1.5 text-xs font-bold text-violet-700 transition hover:bg-violet-100 sm:px-3 sm:text-sm"
+            >
+              카드 보관함
+            </button>
+            <button
+              type="button"
+              onClick={() => setIsScratchPadOpen(true)}
+              className="rounded-lg border border-blue-300 bg-blue-50 px-2.5 py-1.5 text-xs font-bold text-blue-700 transition hover:bg-blue-100 sm:px-3 sm:text-sm"
+            >
+              연습장
+            </button>
+          </div>
+        </div>
+      ) : (
       <div className="grid shrink-0 gap-4 lg:grid-cols-[1fr_auto] lg:items-end">
         <div>
           <p className="text-xs font-semibold text-blue-700 sm:text-sm">{headerKicker}</p>
@@ -2437,6 +3174,7 @@ export default function TrainingMode({
           ) : null}
         </div>
       </div>
+      )}
 
       {!showTrainingProblemBody ? (
       <>
@@ -2634,7 +3372,8 @@ export default function TrainingMode({
               : 'training-result-page-scroll flex flex-col'
           }
         >
-      <div className="mb-4 mt-3 flex shrink-0 flex-wrap items-center gap-x-2 gap-y-1 rounded-2xl border border-blue-100 bg-blue-50/90 px-3 py-2.5 text-sm font-semibold text-slate-800 sm:mb-5 sm:mt-4 sm:px-4 sm:text-base">
+      {!useFixedTrainingLayout ? (
+      <div className={`flex shrink-0 flex-wrap items-center gap-x-2 gap-y-1 rounded-2xl border border-blue-100 bg-blue-50/90 px-3 py-2 text-sm font-semibold text-slate-800 sm:px-4 sm:text-base ${isResultView ? 'mb-4 mt-3 sm:mb-5 sm:mt-4' : ''}`}>
         {isResultView ? (
           <>
             <p className="text-base font-black text-violet-950 sm:text-lg">수련 완료</p>
@@ -2649,6 +3388,7 @@ export default function TrainingMode({
           </>
         )}
       </div>
+      ) : null}
       {isResultView && resultOutcomeCard ? (
         <section
           className="mt-4 rounded-3xl border-2 border-violet-300 bg-gradient-to-br from-white via-violet-50/90 to-indigo-50/80 p-4 shadow-lg shadow-violet-200/40 sm:p-6"
@@ -2771,8 +3511,8 @@ export default function TrainingMode({
                   <div className="mt-2 grid gap-2 sm:grid-cols-2">
                     <div>
                       <p className="text-xs font-semibold text-blue-700 sm:text-sm">정답:</p>
-                      <p className="mt-1 whitespace-pre-wrap rounded-md border border-blue-200 bg-blue-50 px-2 py-1 text-sm text-blue-900">
-                        {renderTextWithFractions(item.correctAnswer, `history-correct-${item.stepNumber}`)}
+                      <p className="mt-1 rounded-md border border-blue-200 bg-blue-50 px-2 py-1 text-sm text-blue-900">
+                        {renderHistoryCorrectAnswer(item.correctAnswer, `history-correct-${item.stepNumber}`)}
                       </p>
                     </div>
                     <div>
@@ -2802,97 +3542,68 @@ export default function TrainingMode({
             </p>
           </div>
         ) : null}
-        <div className="training-problem-steps flex min-h-0 flex-1 flex-col overflow-hidden rounded-b-2xl bg-blue-50/60">
-          {resultDisplay.completedSteps.length > 0 ? (
-            <div
-              ref={stepHistoryScrollRef}
-              className="training-step-history-scroll min-h-0 flex-1 overflow-y-auto px-3 py-3 sm:px-5 sm:py-4"
-            >
-              <div className="pr-1">
-                {resultDisplay.completedSteps.map((item) => (
-                  <div
-                    key={`completed-${item.stepNumber}`}
-                    className="mb-3 rounded-2xl border border-blue-200 bg-white p-3 sm:mb-4 sm:p-4"
-                  >
-                    <div className="flex flex-wrap items-center gap-2 sm:gap-3">
-                      <span className="rounded-full bg-blue-600 px-3 py-1 text-xs font-bold text-white">
-                        수련 {item.displayStepNumber ?? item.stepNumber} /{' '}
-                        {item.totalActiveSteps ?? resultDisplay.activeStepCount}
-                      </span>
-                      <span className="text-sm font-extrabold text-slate-700 sm:text-base">{item.label}</span>
-                      <span
-                        className={[
-                          'rounded-full px-2.5 py-1 text-xs font-bold',
-                          Number(item.processResult) > 0
-                            ? 'bg-emerald-100 text-emerald-700'
-                            : 'bg-rose-100 text-rose-700',
-                        ].join(' ')}
-                      >
-                        {Number(item.processResult) > 0 ? '성공' : '실패'}
-                      </span>
+        <div
+          className={[
+            'training-problem-steps flex min-h-0 flex-1 flex-col overflow-hidden rounded-b-2xl bg-blue-50/60',
+            isLastActiveStep ? 'training-problem-steps--last-step' : '',
+          ]
+            .filter(Boolean)
+            .join(' ')}
+        >
+          <div
+            ref={stepHistoryScrollRef}
+            className="training-step-history-scroll min-h-0 flex-1 overflow-y-auto px-3 py-3 sm:px-5 sm:py-4"
+          >
+            <div className="pr-1">
+              {resultDisplay.completedSteps.map((item) => (
+                <div
+                  key={`completed-${item.stepNumber}`}
+                  className="mb-3 rounded-2xl border border-blue-200 bg-white p-3 sm:mb-4 sm:p-4"
+                >
+                  <div className="flex flex-wrap items-center gap-2 sm:gap-3">
+                    <span className="rounded-full bg-blue-600 px-3 py-1 text-xs font-bold text-white">
+                      수련 {item.displayStepNumber ?? item.stepNumber} /{' '}
+                      {item.totalActiveSteps ?? resultDisplay.activeStepCount}
+                    </span>
+                    <span className="text-sm font-extrabold text-slate-700 sm:text-base">{item.label}</span>
+                    <span
+                      className={[
+                        'rounded-full px-2.5 py-1 text-xs font-bold',
+                        Number(item.processResult) > 0
+                          ? 'bg-emerald-100 text-emerald-700'
+                          : 'bg-rose-100 text-rose-700',
+                      ].join(' ')}
+                    >
+                      {Number(item.processResult) > 0 ? '성공' : '실패'}
+                    </span>
+                  </div>
+                  <p className="mt-2 whitespace-pre-wrap text-sm text-slate-800 sm:mt-3 sm:text-base">
+                    {renderTextWithFractions(item.question, `history-question-${item.stepNumber}`)}
+                  </p>
+                  <div className="mt-2 grid gap-2 sm:grid-cols-2">
+                    <div>
+                      <p className="text-xs font-semibold text-blue-700 sm:text-sm">정답:</p>
+                      <p className="mt-1 rounded-md border border-blue-200 bg-blue-50 px-2 py-1 text-sm text-blue-900">
+                        {renderHistoryCorrectAnswer(item.correctAnswer, `history-correct-${item.stepNumber}`)}
+                      </p>
                     </div>
-                    <p className="mt-2 whitespace-pre-wrap text-sm text-slate-800 sm:mt-3 sm:text-base">
-                      {renderTextWithFractions(item.question, `history-question-${item.stepNumber}`)}
-                    </p>
-                    <div className="mt-2 grid gap-2 sm:grid-cols-2">
-                      <div>
-                        <p className="text-xs font-semibold text-blue-700 sm:text-sm">정답:</p>
-                        <p className="mt-1 whitespace-pre-wrap rounded-md border border-blue-200 bg-blue-50 px-2 py-1 text-sm text-blue-900">
-                          {renderTextWithFractions(item.correctAnswer, `history-correct-${item.stepNumber}`)}
-                        </p>
-                      </div>
-                      <div>
-                        <p className="text-xs font-semibold text-emerald-700 sm:text-sm">입력한 답:</p>
-                        <p className="mt-1 whitespace-pre-wrap rounded-md border border-emerald-200 bg-emerald-50 px-2 py-1 text-sm text-emerald-900">
-                          {String(item.answer ?? '').trim()
-                            ? renderTextWithFractions(item.answer, `history-answer-${item.stepNumber}`)
-                            : '미입력'}
-                        </p>
-                      </div>
+                    <div>
+                      <p className="text-xs font-semibold text-emerald-700 sm:text-sm">입력한 답:</p>
+                      <p className="mt-1 whitespace-pre-wrap rounded-md border border-emerald-200 bg-emerald-50 px-2 py-1 text-sm text-emerald-900">
+                        {String(item.answer ?? '').trim()
+                          ? renderTextWithFractions(item.answer, `history-answer-${item.stepNumber}`)
+                          : '미입력'}
+                      </p>
                     </div>
                   </div>
-                ))}
-              </div>
-            </div>
-          ) : null}
-          {!isAwaitingResultSave && !isFinalStepLocked ? (
-            <div className="training-step-input-panel shrink-0 border-t border-blue-100 bg-blue-50/90 p-3 sm:p-5">
-              <div className="flex flex-wrap items-center gap-2 sm:gap-3">
-                <span className="rounded-full bg-blue-600 px-3 py-1 text-xs font-bold text-white">
-                  수련 {activeFlowPosition + 1} / {activeStepCount || 1}
-                </span>
-                <span className="text-sm font-extrabold text-slate-700 sm:text-base">{stepLabel}</span>
-              </div>
-              <div className="mt-4">{renderQuestionBody()}</div>
-              {answerCheckState === 'correct' && (
-                <p className="mt-3 text-sm font-semibold text-emerald-700">정답입니다!</p>
-              )}
-              {answerCheckState === 'wrong' && (
-                <p className="mt-3 text-sm font-semibold text-rose-700">
-                  {currentStepHintAvailable
-                    ? '다시 한번 생각해보세요. 힌트를 사용해도 좋습니다'
-                    : '다시 한번 생각해보세요.'}
-                </p>
-              )}
-              {answerCheckState === '' && !canAdvance && (
-                <p className="mt-3 text-sm text-slate-500">
-                  {isChoiceStep
-                    ? '선택지를 눌러 주세요.'
-                    : '정답 형태로 입력한 뒤 「입력」을 누르면 다음으로 넘어갈 수 있어요.'}
-                </p>
-              )}
-              {currentStepHintAvailable ? (
-                <div className="mt-4 flex flex-wrap gap-2.5 sm:gap-3">
-                  <button
-                    type="button"
-                    onClick={handleHint}
-                    disabled={isStepJudged}
-                    className={softButtonClass}
-                  >
-                    힌트 보기
-                  </button>
                 </div>
-              ) : null}
+              ))}
+              {!isLastActiveStep ? renderActiveStepPanel() : null}
+            </div>
+          </div>
+          {isLastActiveStep ? (
+            <div className="training-step-pinned-slot shrink-0 px-3 sm:px-5">
+              <div className="pr-1">{renderActiveStepPanel({ pinned: true })}</div>
             </div>
           ) : null}
         </div>
@@ -2903,10 +3614,35 @@ export default function TrainingMode({
       </section>
       </div>
       <ScratchPadModal open={isScratchPadOpen} onClose={() => setIsScratchPadOpen(false)} />
+      <EquationScaffoldingModal
+        open={Boolean(scaffoldingSession && !isStepFocusedLearningOpen)}
+        step={activeScaffoldStep}
+        stepIndex={scaffoldingSession?.stepIndex ?? 0}
+        totalSteps={scaffoldingSession?.steps?.length ?? 0}
+        showRemember={scaffoldingSession?.showRemember ?? false}
+        wrongPickCount={scaffoldingSession?.wrongPickCount ?? 0}
+        rememberText={activeScaffoldStep?.remember ?? ''}
+        isFinished={scaffoldingSession?.isFinished ?? false}
+        onSelectChoice={handleScaffoldingChoiceSelect}
+        onLearnConcept={handleScaffoldingLearnConcept}
+        onExitAlone={closeScaffoldingSession}
+        onReturnToProblem={closeScaffoldingSession}
+      />
       <StepFocusedLearningModal
         open={isStepFocusedLearningOpen}
-        onClose={() => setIsStepFocusedLearningOpen(false)}
-        stageLabel={currentStage?.displayLabel ?? ''}
+        onClose={() => {
+          setIsStepFocusedLearningOpen(false)
+          setScaffoldingConceptKey(null)
+        }}
+        stageLabel={
+          scaffoldingConceptKey ? '5단계 방정식 풀기' : currentStage?.displayLabel ?? ''
+        }
+        dialogTitle={scaffoldingConceptKey ? '이 개념 다시 배우기' : '단계 집중 학습'}
+        returnButtonLabel={
+          scaffoldingConceptKey
+            ? '보리도사와 함께 푸는 방정식으로 돌아가기'
+            : undefined
+        }
         conceptBundles={stepFocusedConceptBundles}
       />
     </>

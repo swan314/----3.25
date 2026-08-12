@@ -143,6 +143,143 @@ body {
   max-height: 42px;
   font-size: 0.9375rem;
   scroll-margin: 0;
+  overflow-anchor: none;
+}
+
+/* 풀이 중 바깥 스크롤 잠금 — 단계 영역만 스크롤 */
+main.training-solving-main-lock {
+  overflow: hidden !important;
+  overscroll-behavior: none;
+}
+
+.training-math-field-host--no-vk math-field::part(virtual-keyboard-toggle) {
+  display: none;
+}
+
+/* 5·6단계(가상키보드 비활성) — 삼선 메뉴만 숨김. 2~4단계 math-field에는 미적용 */
+.training-math-field-host--no-vk math-field::part(menu-toggle) {
+  display: none;
+}
+
+/* 중1 방정식 전용 MathLive 가상 키보드 — 반응형 동일 키폭, fit-content 컨테이너 */
+body.training-m1-math-keyboard-active {
+  --training-vk-safe-inline: 16px;
+  --training-vk-region-gap: 5px;
+  --keycap-gap: 2px;
+  --keycap-width: clamp(20px, calc((100vw - 31px) / 14), 42px);
+  --keycap-height: 48px;
+  --keycap-max-width: var(--keycap-width);
+  --keycap-font-size: clamp(12px, calc(var(--keycap-width) * 0.38), 16px);
+  --keycap-small-font-size: 11px;
+  --keyboard-padding-top: 4px;
+  --keyboard-padding-bottom: 5px;
+  --keyboard-padding-horizontal: 6px;
+  --keyboard-toolbar-font-size: 14px;
+  --training-vk-content-width: calc(
+    14 * var(--keycap-width) - var(--keycap-gap) + var(--training-vk-region-gap)
+  );
+}
+
+@media (max-width: 420px) {
+  body.training-m1-math-keyboard-active {
+    --keycap-gap: 1px;
+    --keyboard-padding-horizontal: 4px;
+    --training-vk-region-gap: 3px;
+    --keycap-width: clamp(20px, calc((100vw - 40px) / 14), 42px);
+    --training-vk-content-width: calc(
+      14 * var(--keycap-width) - var(--keycap-gap) + var(--training-vk-region-gap) + 14px
+    );
+  }
+}
+
+/*
+ * MathLive 기본: .MLK__plate { width: 100% } + 키 폭 10cqw → viewport 전체 너비 사용.
+ * --keycap-width 반응형 + plate/backdrop/row max-content로 키 묶음 크기에 맞춤.
+ */
+body.training-m1-math-keyboard-active > .ML__keyboard {
+  --keycap-height: 48px;
+  --keycap-max-width: var(--keycap-width);
+}
+
+body.training-m1-math-keyboard-active > .ML__keyboard .MLK__backdrop {
+  box-sizing: border-box;
+  width: calc(
+    var(--training-vk-content-width) + 2 * var(--keyboard-padding-horizontal)
+  ) !important;
+  max-width: calc(100vw - var(--training-vk-safe-inline)) !important;
+  left: 0 !important;
+  right: 0 !important;
+  margin-left: auto !important;
+  margin-right: auto !important;
+  overflow-x: hidden !important;
+  overflow-y: hidden !important;
+}
+
+body.training-m1-math-keyboard-active > .ML__keyboard.is-visible > .MLK__backdrop {
+  transform: translateY(calc(-1 * var(--_keyboard-height))) !important;
+}
+
+body.training-m1-math-keyboard-active > .ML__keyboard .MLK__plate {
+  box-sizing: border-box;
+  width: var(--training-vk-content-width) !important;
+  max-width: calc(100vw - var(--training-vk-safe-inline) - 2 * var(--keyboard-padding-horizontal)) !important;
+  left: var(--keyboard-padding-horizontal) !important;
+  padding-right: 0 !important;
+  overflow-x: hidden !important;
+  overflow-y: hidden !important;
+}
+
+/*
+ * MathLive keyboard open: body overflow:hidden + margin-right 보정.
+ * 학습 스크롤은 main/단계 영역 내부에만 있으므로 body margin 보정은 불필요하고
+ * html/body에幽霊 scrollbar가 생길 수 있음 → open 중 document 스크롤만 억제.
+ */
+html:has(body.training-m1-math-keyboard-active .ML__keyboard.is-visible) {
+  overflow: hidden !important;
+}
+
+body.training-m1-math-keyboard-active:has(.ML__keyboard.is-visible) {
+  overflow: hidden !important;
+  margin-right: 0 !important;
+}
+
+body.training-m1-math-keyboard-active .MLK__rows {
+  width: var(--training-vk-content-width);
+  max-width: 100%;
+  --keycap-width: clamp(20px, calc((100vw - 31px) / 14), 42px);
+  --_keycap-width: var(--keycap-width);
+  --keycap-max-width: var(--keycap-width);
+  --_keycap-max-width: var(--keycap-width);
+}
+
+@media (max-width: 420px) {
+  body.training-m1-math-keyboard-active .MLK__rows {
+    --keycap-width: clamp(20px, calc((100vw - 40px) / 14), 42px);
+    --_keycap-width: var(--keycap-width);
+    --keycap-max-width: var(--keycap-width);
+    --_keycap-max-width: var(--keycap-width);
+  }
+}
+
+body.training-m1-math-keyboard-active .MLK__rows > .MLK__row {
+  width: var(--training-vk-content-width);
+  max-width: 100%;
+  justify-content: flex-start;
+}
+
+body.training-m1-math-keyboard-active .MLK__rows > .MLK__row > div {
+  flex: 0 0 calc(var(--keycap-width) - var(--keycap-gap)) !important;
+  width: calc(var(--keycap-width) - var(--keycap-gap)) !important;
+  min-width: calc(var(--keycap-width) - var(--keycap-gap)) !important;
+  max-width: calc(var(--keycap-width) - var(--keycap-gap)) !important;
+}
+
+body.training-m1-math-keyboard-active .MLK__rows > .MLK__row .action {
+  padding: 0 !important;
+}
+
+body.training-m1-math-keyboard-active .MLK__rows > .MLK__row > div.tex.training-vk-hangul-label {
+  font-size: clamp(10px, calc(var(--keycap-width) * 0.31), 13px) !important;
 }
 
 .training-result-page-scroll {
@@ -171,15 +308,43 @@ body {
   min-height: 0;
 }
 
+.training-problem-steps--last-step .training-step-history-scroll {
+  flex: 1 1 0%;
+  min-height: 0;
+}
+
+.training-step-input-panel--pinned {
+  flex: 0 0 auto;
+  box-shadow: 0 -4px 12px rgba(37, 99, 235, 0.08);
+}
+
+.training-step-input-panel--compact {
+  max-height: min(26vh, 11.5rem);
+  overflow-y: auto;
+}
+
 .training-step-history-scroll {
   overscroll-behavior: contain;
   overflow-y: auto;
   -webkit-overflow-scrolling: touch;
   scrollbar-gutter: stable;
+  overflow-anchor: none;
+}
+
+/* 6단계 pinned — history-scroll 스크롤바 gutter(15px)와 동일한 content 폭 */
+.training-step-pinned-slot {
+  overflow-y: auto;
+  scrollbar-gutter: stable;
 }
 
 .training-step-input-panel {
-  overscroll-behavior: contain;
+  overflow-anchor: none;
+}
+
+.training-step-input-panel--no-focus-scroll input,
+.training-step-input-panel--no-focus-scroll math-field {
+  scroll-margin: 0;
+  overflow-anchor: none;
 }
 
 @keyframes training-intro-cta-glow {
@@ -371,4 +536,68 @@ body {
   margin: 0 auto !important;
   border-radius: 0.75rem !important;
   pointer-events: auto !important;
+}
+
+/* 단계 집중 학습 — 예제 세로형·등호 정렬 */
+.step-example-block {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+
+.step-example-head {
+  display: flex;
+  align-items: baseline;
+  gap: 0.2em;
+  text-align: left;
+}
+
+.step-example-marker {
+  flex-shrink: 0;
+}
+
+.step-example-head-body {
+  min-width: 0;
+}
+
+.step-example-steps {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+  padding-left: 1.35em;
+}
+
+.step-example-step {
+  display: grid;
+  align-items: baseline;
+  column-gap: 0.35em;
+  text-align: left;
+}
+
+.step-example-step--eq-leading {
+  grid-template-columns: 0 minmax(1.25em, auto) minmax(0, 1fr);
+}
+
+.step-example-step--eq-inner {
+  grid-template-columns: minmax(0, max-content) minmax(1.25em, auto) minmax(0, 1fr);
+}
+
+.step-example-step--text {
+  display: block;
+}
+
+.step-example-prefix,
+.step-example-body {
+  min-width: 0;
+}
+
+.step-example-eq {
+  text-align: center;
+  flex-shrink: 0;
+  font-weight: 400;
+}
+
+.step-example-root .step-example-math {
+  font-size: inherit;
+  vertical-align: baseline;
 }
